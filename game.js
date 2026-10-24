@@ -5,7 +5,8 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const WINW = 640, WINH = 480;
+let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
+let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
 const BOX_CX = (BOX_X0 + BOX_X1) * 0.5, BOX_CY = (BOX_Y0 + BOX_Y1) * 0.5;
 const JEV_CX = 320, JEV_CY = 140;
@@ -839,7 +840,7 @@ cv.addEventListener("pointerdown", e=>{
     for (const h of hotspots){ if (p.x>=h.x && p.x<=h.x+h.w && p.y>=h.y && p.y<=h.y+h.h){ overHot=true; break; } }
     if (!overHot){
       joy.active=true; joy.id=e.pointerId;
-      joy.bx=p.x; joy.by=p.y; joy.dx=0; joy.dy=0;
+      joy.bx=p.x-VOX; joy.by=p.y-VOY; joy.dx=0; joy.dy=0;
     }
     touchStart={...p, t:performance.now()};
     return;
@@ -850,7 +851,7 @@ cv.addEventListener("pointermove", e=>{
   if (!joy.active || e.pointerId!==joy.id) return;
   e.preventDefault();
   const p = toLogical(e.clientX, e.clientY);
-  let dx=p.x-joy.bx, dy=p.y-joy.by;
+  let dx=p.x-VOX-joy.bx, dy=p.y-VOY-joy.by;
   const d=Math.hypot(dx,dy);
   if (d>joy.R){ dx=dx/d*joy.R; dy=dy/d*joy.R; }   // 摇杆行程限幅
   joy.dx=dx; joy.dy=dy;
@@ -886,13 +887,27 @@ function fitCanvas(){
   const dpr = window.devicePixelRatio || 1;
   SS = clamp(Math.round(dpr*10)/10, 1, 2);   // 最高 2 倍超采样，兼顾手机性能
   const ww = window.innerWidth, wh = window.innerHeight;
+  const ar = ww/wh;
+  if (ar >= 1){                              // 横屏：高度固定 480，宽度铺满
+    WINH = 480;
+    WINW = clamp(Math.round(480*ar), 640, 1120);
+  } else {                                   // 竖屏：宽度固定 640，高度铺满
+    WINW = 640;
+    WINH = clamp(Math.round(640/ar), 480, 1280);
+  }
+  VOX = (WINW-640)/2;
+  VOY = Math.max(0, Math.round((WINH-480-58)/2));   // 底部留出 UI 高度后整体居中
+  crtDirty = true;
   const sc = Math.min(ww/WINW, wh/WINH);
   cv.style.width  = Math.floor(WINW*sc)+"px";
   cv.style.height = Math.floor(WINH*sc)+"px";
   cv.width  = Math.floor(WINW*sc*SS);
   cv.height = Math.floor(WINH*sc*SS);
+  // 画布最大程度铺满屏幕（不留大片黑边），多余空间由 CSS 居中留极少边
+  cv.style.width  = Math.floor(WINW*sc)+"px";
+  cv.style.height = Math.floor(WINH*sc)+"px";
   const hint = document.getElementById("rotate");
-  if (hint) hint.style.display = (ww < wh && ww < 820) ? "block" : "none";
+  if (hint) hint.style.display = "none";     // 竖屏也能全屏显示，不再强制横屏
 }
 window.addEventListener("resize", fitCanvas);
 fitCanvas();
@@ -946,11 +961,11 @@ function RenderTitle(){
     ctx.fillStyle = "rgba(120,200,255,0.09)";
     ctx.fillRect(0,y,WINW,42);
   }
-  outlineText("混沌挑战", 0, 22, 56, "#ffec78", WINW/2);
-  outlineText("CHOOSE  YOUR  CHAOS", 0, 92, 15, "#c8dcff", WINW/2, false);
+  outlineText("混沌挑战", 0, 22+VOY, 56, "#ffec78", WINW/2);
+  outlineText("CHOOSE  YOUR  CHAOS", 0, 92+VOY, 15, "#c8dcff", WINW/2, false);
 
   for (let i=0;i<BOSS_N;++i){
-    const x=34+i*146, y=118, w=132, h=214;
+    const x=VOX+34+i*146, y=VOY+118, w=132, h=214;
     const sel = i===g_bossSel;
     ctx.fillStyle = sel ? "rgba(52,30,62,0.94)" : "rgba(22,16,34,0.75)";
     ctx.fillRect(x,y,w,h);
@@ -985,25 +1000,25 @@ function RenderTitle(){
     });
   }
   if (isTouch)
-    outlineText("点选角色　再点一次开战", 0, 352, 15, "#d2dce1", WINW/2, false);
+    outlineText("点选角色　再点一次开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
   else
-    outlineText("← → 选择　Z 开战", 0, 352, 15, "#d2dce1", WINW/2, false);
+    outlineText("← → 选择　Z 开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
 }
 
 // ---- 暂停
 function RenderPause(){
   ctx.fillStyle = "rgba(0,0,0,0.80)";
   ctx.fillRect(0,0,WINW,WINH);
-  outlineText("暂　停", 0, 56, 56, "#ffec78", WINW/2);
+  outlineText("暂　停", 0, 56+VOY, 56, "#ffec78", WINW/2);
 
   // 继续游戏
-  outlineText("继续游戏", 0, 168, 24, g_pauseSel===0?"#fff":"#c2becd", WINW/2);
-  if (g_pauseSel===0){ ctx.save(); ctx.imageSmoothingEnabled=false; drawImg(img("soul"), WINW/2-104, 180, 24,24); ctx.restore(); }
-  hot(WINW/2-140, 158, 280, 52, ()=>{ playSfx("snd_menu_select"); g_state=g_pauseFrom; });
+  outlineText("继续游戏", 0, 168+VOY, 24, g_pauseSel===0?"#fff":"#c2becd", WINW/2);
+  if (g_pauseSel===0){ ctx.save(); ctx.imageSmoothingEnabled=false; drawImg(img("soul"), WINW/2-104, 180+VOY, 24,24); ctx.restore(); }
+  hot(WINW/2-140, 158+VOY, 280, 52, ()=>{ playSfx("snd_menu_select"); g_state=g_pauseFrom; });
 
   // 音量
-  outlineText(`音量　　${g_vol}%`, 0, 238, 24, g_pauseSel===1?"#fff":"#c2becd", WINW/2);
-  const bx = WINW/2-100, by = 282, bw = 200, bh = 12;
+  outlineText(`音量　　${g_vol}%`, 0, 238+VOY, 24, g_pauseSel===1?"#fff":"#c2becd", WINW/2);
+  const bx = WINW/2-100, by = 282+VOY, bw = 200, bh = 12;
   ctx.fillStyle="rgba(60,60,90,0.9)"; ctx.fillRect(bx,by,bw,bh);
   ctx.fillStyle="#78d2ff"; ctx.fillRect(bx,by,bw*g_vol/100,bh);
   ctx.strokeStyle="rgba(200,200,240,0.5)"; ctx.lineWidth=1.5; ctx.strokeRect(bx,by,bw,bh);
@@ -1012,11 +1027,11 @@ function RenderPause(){
   hot(bx-10, by-20, bw+20, 44, ()=>{ g_pauseSel=1; });
 
   // 退出
-  outlineText("退出挑战", 0, 348, 24, g_pauseSel===2?"#fff":"#c2becd", WINW/2);
-  if (g_pauseSel===2){ ctx.save(); ctx.imageSmoothingEnabled=false; drawImg(img("soul"), WINW/2-104, 360, 24,24); ctx.restore(); }
-  hot(WINW/2-140, 338, 280, 52, ()=>{ playSfx("snd_menu_select"); GoTitle(); });
+  outlineText("退出挑战", 0, 348+VOY, 24, g_pauseSel===2?"#fff":"#c2becd", WINW/2);
+  if (g_pauseSel===2){ ctx.save(); ctx.imageSmoothingEnabled=false; drawImg(img("soul"), WINW/2-104, 360+VOY, 24,24); ctx.restore(); }
+  hot(WINW/2-140, 338+VOY, 280, 52, ()=>{ playSfx("snd_menu_select"); GoTitle(); });
 
-  if (!isTouch) outlineText("↑ ↓ 选择　Z 确认　ESC 继续", 0, 430, 15, "#bec8cd", WINW/2, false);
+  if (!isTouch) outlineText("↑ ↓ 选择　Z 确认　ESC 继续", 0, 430+VOY, 15, "#bec8cd", WINW/2, false);
 }
 // 简单按钮（描边圆角）
 function btn(x,y,w,h,label,fn){
@@ -1060,6 +1075,10 @@ function Render(){
   const bg = img("bg");
   if (bg) ctx.drawImage(bg, -6, -6, WINW+12, WINH+12);
   else { ctx.fillStyle="rgb(30,15,50)"; ctx.fillRect(-6,-6,WINW+12,WINH+12); }
+
+  // 进入 640x480 场景坐标系（宽屏时居中，两侧/上下由背景补满）
+  ctx.save();
+  ctx.translate(VOX, VOY);
 
   const bob = Math.sin(g_animT*2.6)*6;
   let sx=0, sy=0;
@@ -1266,28 +1285,32 @@ function Render(){
       ctx.restore();
     }
   }
+  ctx.restore();   // 场景坐标系结束
   ctx.restore();   // 震屏结束
 
   // ---- 字幕
   if (g_subtitle)
-    outlineText(g_subtitle, 0, 246, 20, "#ffe058", WINW/2);
+    outlineText(g_subtitle, 0, 246+VOY, 20, "#ffe058", WINW/2);
   // 触屏操作提示（第一轮弹幕时出现）
   if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5)
-    outlineText("按住屏幕出摇杆 拖动方向躲避", 0, 464, 14, "#c8d8ff", WINW/2, false);
+    outlineText("按住屏幕出摇杆 拖动方向躲避", 0, VOY+424, 14, "#c8d8ff", WINW/2, false);
 
-  // ---- 底部 UI
+  // ---- 底部 UI（贴屏幕底边）
   if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_INTRO){
-    outlineText("HP", 14, 432, 22, "#ffe678", -1);
-    ctx.fillStyle="rgba(40,15,25,0.86)"; ctx.fillRect(46,436,110,18);
-    ctx.fillStyle="#ffc850"; ctx.fillRect(46,436,110*(g_hp/PLAYER_MAXHP),18);
-    ctx.fillStyle="rgba(255,255,200,0.9)"; ctx.fillRect(46,436,110*(g_hp/PLAYER_MAXHP),6);
-    ctx.strokeStyle="rgba(240,240,245,1)"; ctx.lineWidth=1.6; ctx.strokeRect(46,436,110,18);
-    outlineText(`${Math.ceil(g_hp)}/${Math.floor(PLAYER_MAXHP)}`, 160, 434, 15, "#fff", -1, false);
+    const byy = WINH-72;
+    outlineText("HP", 14, byy-4, 22, "#ffe678", -1);
+    ctx.fillStyle="rgba(40,15,25,0.86)"; ctx.fillRect(46,byy,110,18);
+    ctx.fillStyle="#ffc850"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),18);
+    ctx.fillStyle="rgba(255,255,200,0.9)"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),6);
+    ctx.strokeStyle="rgba(240,240,245,1)"; ctx.lineWidth=1.6; ctx.strokeRect(46,byy,110,18);
+    outlineText(`${Math.ceil(g_hp)}/${Math.floor(PLAYER_MAXHP)}`, 160, byy-2, 15, "#fff", -1, false);
 
-    // 按钮（四个常驻显示，仅主菜单可点）
+    // 按钮（四个常驻显示，仅主菜单可点；整行水平居中）
     const btnKeys=["btn_fight","btn_act","btn_item","btn_mercy"];
+    const rowW = 3*102+98;
+    const rowX = (WINW-rowW)/2;
     for (let i=0;i<4;++i){
-      let bx=236+i*102, by=430, bw=98, bh=34;
+      let bx=rowX+i*102, by=WINH-46, bw=98, bh=34;
       const sel = (g_state===ST_MENU && g_btnSel===i);
       if (sel){ bw+=8; bh+=6; bx-=4; by-=3;
         ctx.strokeStyle="rgba(255,255,255,0.63)"; ctx.lineWidth=2;
@@ -1303,8 +1326,9 @@ function Render(){
     }
   }
 
-  // ---- FIGHT 时机条
+  // ---- FIGHT 时机条（覆盖在战斗框上，跟随场景偏移）
   if (g_state===ST_FIGHT || (g_state===ST_DMG && g_stateT<0.4)){
+    ctx.save(); ctx.translate(VOX,VOY);
     ctx.fillStyle="rgba(10,6,18,0.78)"; ctx.fillRect(250,60,142,190);
     ctx.strokeStyle="#fffafa"; ctx.lineWidth=3; ctx.strokeRect(250,60,142,190);
     ctx.strokeStyle="#ffdc5a"; ctx.lineWidth=2;
@@ -1313,11 +1337,13 @@ function Render(){
       ctx.fillStyle="#ff3c3c";
       ctx.fillRect(g_barX-3, 60, 6, 190);
     }
-    outlineText(isTouch?"点按屏幕出刀！":"按 Z 出刀！", 0, 256, 15, "#fff", WINW/2, false);
+    ctx.restore();
+    outlineText(isTouch?"点按屏幕出刀！":"按 Z 出刀！", 0, 256+VOY, 15, "#fff", WINW/2, false);
   }
 
-  // ---- 子菜单
+  // ---- 子菜单（画在战斗框上，跟随场景偏移；热区换算回舞台坐标）
   if (g_state===ST_SUB){
+    ctx.save(); ctx.translate(VOX,VOY);
     let opts=[], n=0;
     if (g_sub===SM_ACT){ opts=["检查","安抚"]; n=2; }
     if (g_sub===SM_ITEM){ opts=[g_items?"魔法软糖（回复60）":"（空空如也）"]; n=1; }
@@ -1327,7 +1353,7 @@ function Render(){
       outlineText(opts[i], BOX_X0+46, y-10, 22, i===g_subSel?"#fff":"#d8c8d2", -1);
       if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
         drawImg(img("soul"), BOX_X0+26, y, 26,26); ctx.restore(); }
-      hot(BOX_X0+20, y-22, BOX_X1-BOX_X0-40, 40, ()=>{ g_subSel=i; pressKey("z"); });
+      hot(VOX+BOX_X0+20, VOY+y-22, BOX_X1-BOX_X0-40, 40, ()=>{ g_subSel=i; pressKey("z"); });
     }
     if (g_sub===SM_MERCY && g_spareReady){
       const im=img("sparkle");
@@ -1335,15 +1361,18 @@ function Render(){
         drawImg(im, BOX_X1-40, BOX_Y0+30, 36,36, g_animT*160); ctx.restore(); }
       outlineText("!!", BOX_X1-66, BOX_Y0+20, 22, "#ffe65a", -1);
     }
-    hot(BOX_X1-84, BOX_Y0+8, 72, 30, ()=>pressKey("x"));
+    hot(VOX+BOX_X1-84, VOY+BOX_Y0+8, 72, 30, ()=>pressKey("x"));
     outlineText("返回", BOX_X1-74, BOX_Y0+12, 15, "#9aa8c8", -1, false);
+    ctx.restore();
   }
 
-  // ---- 伤害数字
+  // ---- 伤害数字（场景坐标）
+  ctx.save(); ctx.translate(VOX,VOY);
   for (const d of g_dmg){
     const a=Math.min(1, d.life*2);
     outlineText(d.miss?"MISS":String(d.val), d.x, d.y, 34, d.miss?`rgba(180,180,190,${a})`:`rgba(255,235,80,${a})`, d.x);
   }
+  ctx.restore();
 
   // ---- 胜利 / 失败
   if (g_state===ST_WIN || g_state===ST_LOSE){
