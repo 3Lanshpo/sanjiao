@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>sanjiao - Boss战</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; overscroll-behavior: none;
+  }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #000; }
+  #loading {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; color: #ffec80;
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 18px; gap: 14px; z-index: 10; background: #000;
+  }
+  #lbar { width: 240px; height: 10px; border: 2px solid #8899bb; border-radius: 6px; overflow: hidden; }
+  #lfill { height: 100%; width: 0%; background: linear-gradient(90deg,#78c8ff,#b478ff); transition: width .15s; }
+  #rotate {
+    display: none; position: fixed; left: 0; right: 0; bottom: 10px;
+    text-align: center; color: #9fb4d8; font-size: 13px;
+    font-family: "Microsoft YaHei", sans-serif; pointer-events: none; z-index: 20;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="rotate">↻ 建议横屏游玩</div>
+<div id="loading">
+  <div>混沌加载中……</div>
+  <div id="lbar"><div id="lfill"></div></div>
+  <div id="lpct" style="font-size:13px;color:#99a">0%</div>
+</div>
+<script>
+  // 线上分享链接靠 ?sharecode=xxx 鉴权，子资源必须带上同一个查询串
+  (function () {
+    var q = location.search || "";
+    var s = document.createElement("script");
+    s.src = "game.js" + q;
+    s.onerror = function () {
+      var t = document.getElementById("lpct");
+      if (t) t.textContent = "脚本加载失败，请确认链接带有 sharecode";
+    };
+    document.body.appendChild(s);
+  })();
+</script>
+</body>
+</html>
