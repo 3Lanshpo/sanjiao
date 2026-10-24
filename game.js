@@ -10,7 +10,6 @@ const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
 const BOX_CX = (BOX_X0 + BOX_X1) * 0.5, BOX_CY = (BOX_Y0 + BOX_Y1) * 0.5;
 const JEV_CX = 320, JEV_CY = 140;
 const HEART_SPD = 185.0;
-const TOUCH_SPD = 300.0;          // 触屏跟手速度（略高于键盘，弥补触控延迟）
 const PLAYER_MAXHP = 120.0;
 
 // 状态
@@ -412,13 +411,12 @@ function Update(dt){
     if (keys.has("ArrowRight")) g_heartX+=sp;
     if (keys.has("ArrowUp"))    g_heartY-=sp;
     if (keys.has("ArrowDown"))  g_heartY+=sp;
-    // 触屏：红心追手指
-    if (touchTarget){
-      const dx=touchTarget.x-g_heartX, dy=touchTarget.y-g_heartY;
-      const d=Math.hypot(dx,dy);
+    // 触屏：虚拟摇杆（方向即时生效，松手立刻停，无滑行）
+    if (joy.active){
+      const d=Math.hypot(joy.dx,joy.dy);
       if (d>2){
-        const step=Math.min(d, TOUCH_SPD*dt);
-        g_heartX+=dx/d*step; g_heartY+=dy/d*step;
+        const k=Math.min(1, d/joy.R);          // 摇杆行程 → 速度比例
+        g_heartX+=joy.dx/d*sp*k; g_heartY+=joy.dy/d*sp*k;
       }
     }
     g_heartX=clamp(g_heartX, BOX_X0+10, BOX_X1-10);
@@ -744,9 +742,9 @@ function Update(dt){
 
 // ---------------- 输入 ----------------
 const keys = new Set();
-let touchTarget = null;        // {x,y} 逻辑坐标
-let touchActive = false;
 let touchStart = null;         // 判定点按 vs 拖动
+// 虚拟摇杆：按下处为底座，拖动方向即移动方向，松手立即停止
+const joy = { active:false, id:null, bx:0, by:0, dx:0, dy:0, R:34 };
 
 // 每帧渲染时重建的点击热区
 let hotspots = [];
@@ -836,19 +834,30 @@ cv.addEventListener("pointerdown", e=>{
   e.preventDefault();
   const p = toLogical(e.clientX, e.clientY);
   if (g_state===ST_ATTACK){
-    touchActive=true; touchTarget=p; touchStart={...p, t:performance.now()};
+    // 按在热区上（暂停按钮等）不启动摇杆
+    let overHot=false;
+    for (const h of hotspots){ if (p.x>=h.x && p.x<=h.x+h.w && p.y>=h.y && p.y<=h.y+h.h){ overHot=true; break; } }
+    if (!overHot){
+      joy.active=true; joy.id=e.pointerId;
+      joy.bx=p.x; joy.by=p.y; joy.dx=0; joy.dy=0;
+    }
+    touchStart={...p, t:performance.now()};
     return;
   }
   touchStart={...p, t:performance.now()};
 });
 cv.addEventListener("pointermove", e=>{
-  if (!touchActive) return;
+  if (!joy.active || e.pointerId!==joy.id) return;
   e.preventDefault();
-  touchTarget = toLogical(e.clientX, e.clientY);
+  const p = toLogical(e.clientX, e.clientY);
+  let dx=p.x-joy.bx, dy=p.y-joy.by;
+  const d=Math.hypot(dx,dy);
+  if (d>joy.R){ dx=dx/d*joy.R; dy=dy/d*joy.R; }   // 摇杆行程限幅
+  joy.dx=dx; joy.dy=dy;
 });
 function endPointer(e){
-  const wasAttack = touchActive;
-  touchActive=false; touchTarget=null;
+  const wasJoy = joy.active && e.pointerId===joy.id;
+  if (wasJoy){ joy.active=false; joy.dx=0; joy.dy=0; joy.id=null; }
   if (!touchStart) return;
   const p = toLogical(e.clientX, e.clientY);
   const moved = Math.hypot(p.x-touchStart.x, p.y-touchStart.y);
@@ -866,7 +875,7 @@ function endPointer(e){
   else if (g_state===ST_DIALOG || g_state===ST_INTRO) g_stateT=Math.max(g_stateT, 1.99);
 }
 cv.addEventListener("pointerup", e=>{ e.preventDefault(); endPointer(e); });
-cv.addEventListener("pointercancel", ()=>{ touchActive=false; touchTarget=null; touchStart=null; });
+cv.addEventListener("pointercancel", e=>{ joy.active=false; joy.dx=0; joy.dy=0; joy.id=null; touchStart=null; });
 
 // ---------------- 渲染 ----------------
 const ctx = cv.getContext("2d");
@@ -1238,6 +1247,24 @@ function Render(){
       drawImg(img("soul"), g_heartX, g_heartY, 28,28);
       ctx.restore();
     }
+    // 虚拟摇杆（弹幕阶段按下屏幕时出现）
+    if (joy.active){
+      const kx=joy.bx+joy.dx, ky=joy.by+joy.dy;
+      ctx.save();
+      ctx.globalAlpha=0.35;
+      ctx.fillStyle="#0a0a14";
+      ctx.beginPath(); ctx.arc(joy.bx,joy.by,joy.R+6,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=0.55;
+      ctx.strokeStyle="#ffffff"; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(joy.bx,joy.by,joy.R+6,0,Math.PI*2); ctx.stroke();
+      ctx.globalAlpha=0.85;
+      ctx.fillStyle="#ff2244";
+      ctx.beginPath(); ctx.arc(kx,ky,14,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha=1;
+      ctx.strokeStyle="#ffd0d8"; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(kx,ky,14,0,Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
   }
   ctx.restore();   // 震屏结束
 
@@ -1246,7 +1273,7 @@ function Render(){
     outlineText(g_subtitle, 0, 246, 20, "#ffe058", WINW/2);
   // 触屏操作提示（第一轮弹幕时出现）
   if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5)
-    outlineText("按住屏幕拖动红心躲避", 0, 464, 14, "#c8d8ff", WINW/2, false);
+    outlineText("按住屏幕出摇杆 拖动方向躲避", 0, 464, 14, "#c8d8ff", WINW/2, false);
 
   // ---- 底部 UI
   if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_INTRO){
