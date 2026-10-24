@@ -888,24 +888,20 @@ function fitCanvas(){
   SS = clamp(Math.round(dpr*10)/10, 1, 2);   // 最高 2 倍超采样，兼顾手机性能
   const ww = window.innerWidth, wh = window.innerHeight;
   const ar = ww/wh;
-  if (ar >= 1){                              // 横屏：高度固定 480，宽度铺满
+  if (ar >= 1){                              // 横屏：高度固定 480，宽度铺满（不限上限，避免两侧留黑）
     WINH = 480;
-    WINW = clamp(Math.round(480*ar), 640, 1120);
+    WINW = Math.max(640, Math.round(480*ar));
   } else {                                   // 竖屏：宽度固定 640，高度铺满
     WINW = 640;
-    WINH = clamp(Math.round(640/ar), 480, 1280);
+    WINH = Math.max(480, Math.round(640/ar));
   }
   VOX = (WINW-640)/2;
   VOY = Math.max(0, Math.round((WINH-480-58)/2));   // 底部留出 UI 高度后整体居中
   crtDirty = true;
-  const sc = Math.min(ww/WINW, wh/WINH);
-  cv.style.width  = Math.floor(WINW*sc)+"px";
-  cv.style.height = Math.floor(WINH*sc)+"px";
-  cv.width  = Math.floor(WINW*sc*SS);
-  cv.height = Math.floor(WINH*sc*SS);
-  // 画布最大程度铺满屏幕（不留大片黑边），多余空间由 CSS 居中留极少边
-  cv.style.width  = Math.floor(WINW*sc)+"px";
-  cv.style.height = Math.floor(WINH*sc)+"px";
+  // 显示尺寸由 CSS 的 100vw/100vh 决定（像素缓冲直接按屏幕尺寸），
+  // WINW/WINH 与屏幕等比，所以拉伸到视口时不会变形
+  cv.width  = Math.max(1, Math.round(ww*Math.min(SS,1.5)));
+  cv.height = Math.max(1, Math.round(wh*Math.min(SS,1.5)));
   const hint = document.getElementById("rotate");
   if (hint) hint.style.display = "none";     // 竖屏也能全屏显示，不再强制横屏
 }
