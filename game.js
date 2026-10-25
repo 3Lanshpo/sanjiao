@@ -1369,6 +1369,13 @@ function Render(){
     ctx.beginPath(); ctx.arc(r.x, r.y, rr, 0, 6.29); ctx.stroke();
   }
 
+  // ---- 场内战预告（Tenna / Pink 新招式：整个弹幕阶段持续显示）
+  if (g_state===ST_ATTACK){
+    if (g_pattern===P_MEOW) drawGridWarn();
+    else if (g_pattern===P_KROMER && g_fired) drawSignalWarn();
+    else if (g_pattern===P_MAIL && g_knifeWarn>=0) drawBoltWarn();
+  }
+
   // ---- 镰刀预警线
   if (g_state===ST_ATTACK && g_pattern===P_KNIVES && g_knifeWarn>=0){
     ctx.strokeStyle=`rgba(255,60,60,${(150+100*Math.sin(g_animT*30))/255})`;
@@ -1615,6 +1622,76 @@ function btnPause(){
   });
 }
 
+// ---- 场内战预告（攻击阶段每帧绘制，不只在开场预警窗口）
+function drawGridWarn(){
+  ctx.strokeStyle="rgba(255,140,190,0.26)";
+  ctx.lineWidth=1;
+  ctx.setLineDash([4,6]);
+  for (let i=0;i<=4;++i){
+    const x=BOX_X0+i*(BOX_X1-BOX_X0)/4;
+    const y=BOX_Y0+6+i*(BOX_Y1-BOX_Y0-12)/4;
+    ctx.beginPath(); ctx.moveTo(x,BOX_Y0+4); ctx.lineTo(x,BOX_Y1-4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(BOX_X0+4,y); ctx.lineTo(BOX_X1-4,y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  const cb0=img("catbomb");
+  for (const w of g_gridWarn){
+    const cw=(BOX_X1-BOX_X0-100)/3, ch=(BOX_Y1-BOX_Y0-44)/3;
+    const bx=BOX_X0+50+w.gx*cw, by=BOX_Y0+22+w.gy*ch;
+    const blink=Math.sin(g_animT*20)>0;
+    const a=blink?0.42:0.22;
+    // 待爆的整行 + 整列
+    ctx.fillStyle=`rgba(255,50,105,${a})`;
+    ctx.fillRect(BOX_X0, by-ch/2, BOX_X1-BOX_X0, ch);
+    ctx.fillRect(bx-cw/2, BOX_Y0, cw, BOX_Y1-BOX_Y0);
+    ctx.fillStyle=`rgba(255,225,240,${a*0.5})`;
+    for (let sy=by-ch/2; sy<by+ch/2; sy+=6) ctx.fillRect(BOX_X0, sy, BOX_X1-BOX_X0, 1.5);
+    for (let sx=bx-cw/2; sx<bx+cw/2; sx+=6) ctx.fillRect(sx, BOX_Y0, 1.5, BOX_Y1-BOX_Y0);
+    // 格子描边 + 炸弹图标
+    ctx.strokeStyle=`rgba(255,255,255,${blink?0.95:0.55})`;
+    ctx.lineWidth=2;
+    ctx.strokeRect(bx-cw/2, by-ch/2, cw, ch);
+    if (cb0){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      drawImg(cb0,bx,by,34,34,g_animT*180); ctx.restore(); }
+  }
+}
+
+function drawSignalWarn(){
+  const gapY=BOX_CY+Math.sin(g_waveN*1.15)*50;
+  const side=g_warnSide||0;
+  ctx.fillStyle="rgba(120,255,190,0.18)";
+  ctx.fillRect(BOX_X0, gapY-38, BOX_X1-BOX_X0, 76);
+  ctx.strokeStyle=`rgba(150,255,210,${(140+90*Math.abs(Math.sin(g_animT*6)))/255})`;
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(BOX_X0+4,gapY-38); ctx.lineTo(BOX_X1-4,gapY-38);
+  ctx.moveTo(BOX_X0+4,gapY+38); ctx.lineTo(BOX_X1-4,gapY+38);
+  ctx.stroke();
+  const ph=img("phone");
+  if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
+    for (let y=BOX_Y0+10; y<=BOX_Y1-10; y+=20){
+      if (Math.abs(y-gapY)<38) continue;
+      drawImg(ph, side===0?BOX_X0+18:BOX_X1-18, y, 26,26, 0);
+    } ctx.restore(); }
+  for (let i=0;i<4;++i){
+    const sy=BOX_Y0+((g_animT*44+i*28)%(BOX_Y1-BOX_Y0));
+    ctx.strokeStyle="rgba(180,255,220,0.20)";
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(BOX_X0+2,sy); ctx.lineTo(BOX_X1-2,sy); ctx.stroke();
+  }
+}
+
+function drawBoltWarn(){
+  ctx.strokeStyle=`rgba(200,230,255,${(110+120*Math.abs(Math.sin(g_animT*9)))/255})`;
+  ctx.lineWidth=1.5;
+  ctx.setLineDash([7,7]);
+  ctx.beginPath(); ctx.moveTo(g_warnX,BOX_Y0); ctx.lineTo(g_warnX,BOX_Y1); ctx.stroke();
+  ctx.setLineDash([]);
+  const ph=img("phone");
+  if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
+    drawImg(ph,g_warnX,BOX_Y0+16,30,30,Math.sin(g_animT*22)*14); ctx.restore(); }
+}
+
 // ---- 预警图形（每个招式）
 function renderWarn(pulse){
   switch (g_pattern){
@@ -1677,17 +1754,7 @@ function renderWarn(pulse){
     ctx.lineWidth=2;
     ctx.strokeRect(BOX_X0,BOX_Y0,BOX_X1-BOX_X0,BOX_Y1-BOX_Y0);
     break; }
-  case P_MAIL: {  // Smash Cut：落雷位置预告（切屏本体在 Render 后处理）
-    // 落雷位置提示虚线
-    ctx.strokeStyle=`rgba(200,230,255,${(110+120*pulse)/255})`;
-    ctx.lineWidth=1.5;
-    ctx.setLineDash([7,7]);
-    ctx.beginPath(); ctx.moveTo(g_warnX,BOX_Y0); ctx.lineTo(g_warnX,BOX_Y1); ctx.stroke();
-    ctx.setLineDash([]);
-    const ph=img("phone");
-    if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      drawImg(ph,g_warnX,BOX_Y0+16,30,30,Math.sin(g_animT*22)*14); ctx.restore(); }
-    break; }
+  case P_MAIL: { drawBoltWarn(); break; }
   case P_CALL: {  // Rimshot：反弹星 + 五点散弹
     const st=img("star");
     if (st){ ctx.save(); ctx.imageSmoothingEnabled=false;
@@ -1701,33 +1768,7 @@ function renderWarn(pulse){
       ctx.arc(BOX_CX+Math.cos(a)*46, BOX_CY+Math.sin(a)*36, 5,0,6.29); ctx.fill();
     }
     break; }
-  case P_KROMER: {  // 电视信号墙：竖列墙 + 缺口预览
-    const side = g_warnSide||0;
-    const gapY = BOX_CY+Math.sin(g_waveN*1.15)*50;
-    // 缺口位置
-    ctx.fillStyle=`rgba(120,255,190,${(60+70*pulse)/255})`;
-    ctx.fillRect(BOX_X0, gapY-38, BOX_X1-BOX_X0, 76);
-    ctx.strokeStyle=`rgba(150,255,210,${(140+90*pulse)/255})`;
-    ctx.lineWidth=2;
-    ctx.beginPath();
-    ctx.moveTo(BOX_X0+4,gapY-38); ctx.lineTo(BOX_X1-4,gapY-38);
-    ctx.moveTo(BOX_X0+4,gapY+38); ctx.lineTo(BOX_X1-4,gapY+38);
-    ctx.stroke();
-    // 发射侧信号条
-    const ph=img("phone");
-    if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      for (let y=BOX_Y0+10; y<=BOX_Y1-10; y+=20){
-        if (Math.abs(y-gapY)<38) continue;
-        drawImg(ph, side===0?BOX_X0+18:BOX_X1-18, y, 26,26, 0);
-      } ctx.restore(); }
-    // 扫描线
-    for (let i=0;i<4;++i){
-      const sy=BOX_Y0+((g_animT*44+i*28)%(BOX_Y1-BOX_Y0));
-      ctx.strokeStyle="rgba(180,255,220,0.22)";
-      ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(BOX_X0+2,sy); ctx.lineTo(BOX_X1-2,sy); ctx.stroke();
-    }
-    break; }
+  case P_KROMER: { drawSignalWarn(); break; }
   case P_CRUSHER: {
     ctx.strokeStyle=`rgba(255,150,150,${(140+110*pulse)/255})`;
     ctx.lineWidth=3;
@@ -1814,39 +1855,7 @@ function renderWarn(pulse){
       drawImg(cb,BOX_CX+46,BOX_CY-20-Math.cos(g_animT*4)*4,24,24,g_animT*50);
       ctx.restore(); }
     break; }
-  case P_MEOW: {  // 4x4 炸弹格：网格 + 待引爆行列闪烁预告
-    ctx.strokeStyle="rgba(255,140,190,0.26)";
-    ctx.lineWidth=1;
-    ctx.setLineDash([4,6]);
-    for (let i=0;i<=4;++i){
-      const x=BOX_X0+i*(BOX_X1-BOX_X0)/4;
-      const y=BOX_Y0+6+i*(BOX_Y1-BOX_Y0-12)/4;
-      ctx.beginPath(); ctx.moveTo(x,BOX_Y0+4); ctx.lineTo(x,BOX_Y1-4); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(BOX_X0+4,y); ctx.lineTo(BOX_X1-4,y); ctx.stroke();
-    }
-    ctx.setLineDash([]);
-    const cb0=img("catbomb");
-    for (const w of g_gridWarn){
-      const cw=(BOX_X1-BOX_X0-100)/3, ch=(BOX_Y1-BOX_Y0-44)/3;
-      const bx=BOX_X0+50+w.gx*cw, by=BOX_Y0+22+w.gy*ch;
-      const blink=Math.sin(g_animT*20)>0;
-      const a=blink?0.40:0.20;
-      // 整行 + 整列 高亮带
-      ctx.fillStyle=`rgba(255,60,110,${a})`;
-      ctx.fillRect(BOX_X0, by-ch/2, BOX_X1-BOX_X0, ch);
-      ctx.fillRect(bx-cw/2, BOX_Y0, cw, BOX_Y1-BOX_Y0);
-      // 扫描条纹
-      ctx.fillStyle=`rgba(255,220,235,${a*0.55})`;
-      for (let sy=by-ch/2; sy<by+ch/2; sy+=6) ctx.fillRect(BOX_X0, sy, BOX_X1-BOX_X0, 1.5);
-      for (let sx=bx-cw/2; sx<bx+cw/2; sx+=6) ctx.fillRect(sx, BOX_Y0, 1.5, BOX_Y1-BOX_Y0);
-      // 十字准线
-      ctx.strokeStyle=`rgba(255,255,255,${blink?0.95:0.55})`;
-      ctx.lineWidth=2;
-      ctx.strokeRect(bx-cw/2, by-ch/2, cw, ch);
-      if (cb0){ ctx.save(); ctx.imageSmoothingEnabled=false;
-        drawImg(cb0,bx,by,34,34,g_animT*180); ctx.restore(); }
-    }
-    break; }
+  case P_MEOW: { drawGridWarn(); break; }
   case P_GHOST: {  // 雷达圈
     const rr=20+((g_animT*60)%70);
     const fade=Math.max(0,1-rr/90);
