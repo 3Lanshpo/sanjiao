@@ -59,7 +59,7 @@ const BOSSES = [
   pat:[P_DEAL,P_MAIL,P_CALL,P_KROMER], patW:1.12,
   line:["欢迎来到[大奖赛]！各位观众！","[收视率]就是我的生命！",
         "别换台！好戏才刚开始！","[独家直播]！只要你的灵魂！","别想逃！镜头已经锁定你了！"],
-  patLine:["成交！只要 1997 KROMER！","[邮件]来了！全是你一个人的！","电话响啦！快接快接！","[KROMER] 围过来了！"],
+  patLine:["All-Star Cast！星星穿板！","Smash Cut！切开屏幕！","Rimshot！反弹星星！","电视波！横扫全场！"],
   actNeed:5, check:"Tenna  攻击78  防御6  全城收视冠军" },
 { name:"大人物", title:"BIG SHOT　·　SPAMTON NEO", bgm:"bgm_spamton.mp3",
   maxhp:1500, warn:0.90, dur:13.0,
@@ -70,10 +70,10 @@ const BOSSES = [
   actNeed:6, check:"大人物  攻击99  防御20  不再被任何人牵线" },
 { name:"Pink", title:"MAD MEW MEW　·　粉色魔法少女", bgm:"bgm_pink.mp3",
   maxhp:1900, warn:0.75, dur:14.5,
-  pat:[P_MAGIC,P_LOVE,P_MEOW,P_GHOST], patW:1.40,
+  pat:[P_MAGIC,P_LOVE,P_MEOW,P_GHOST], patW:1.30,
   line:["喵～人家一直想见你哦！","可爱就是正义！喵！",
         "这个身体……完美吧？喵哈哈！","不许躲开人家的爱！","再来一次！Cutie Revolution！"],
-  patLine:["白猫冲锋！找空隙！喵！","喵喵炸弹！十字光波！","猫爪连击！喵喵喵！","幽灵分身！穿墙来啦！"],
+  patLine:["三车道猫冲锋！接住爱心！喵！","喵喵炸弹！十字光波！","4x4 炸弹格！整行整列爆！","雷达圈！别被扫到！喵！"],
   actNeed:7, check:"Pink  攻击110  防御24  粉色魔法少女，无敌可爱" },
 ];
 const BOSS_N = 4;
@@ -95,6 +95,7 @@ let g_spawnT=0, g_knifeWarn=-1, g_warnY=0, g_warnX=0, g_warnSide=0;
 let g_waveN=0, g_fired=false, g_afterDialog=ST_MENU;
 let g_animT=0;
 let g_loveN=0, g_spiralA=0;                    // C++ static 变量
+let g_sliceT=0, g_chainN=0;                    // Tenna 切屏特效 / 闪电连击数
 
 // 特效
 let g_shakeT=0, g_shakeMag=0, g_hitStop=0, g_whiteFlash=0;
@@ -261,7 +262,7 @@ function SpawnPattern(){
   if (g_pattern===g_lastPat) g_pattern = B.pat[randInt(3)];
   g_lastPat = g_pattern;
   g_bullets=[];
-  g_spawnT=0.2; g_knifeWarn=-1; g_fired=false; g_waveN=0;
+  g_spawnT=0.2; g_knifeWarn=-1; g_fired=false; g_waveN=0; g_sliceT=0; g_chainN=0;
   g_heartX=BOX_CX; g_heartY=BOX_CY;
   for (let i=0;i<4;i++) if (B.pat[i]===g_pattern){ Say(B.patLine[i]); break; }
   if (g_boss===0) playVoice(randInt(2)===0 ? "Jevil_voiceclip_CHAOS.wav" : "Jevil_voiceclip_ANYTHING.wav");
@@ -476,42 +477,111 @@ function Update(dt){
           }
         }
       }
-      // ---- Tenna：成交
+      // ---- Tenna：All-Star Cast（星星穿板环射，屏幕明暗交替）
       if (g_pattern===P_DEAL && g_spawnT<=0){
-        g_spawnT=0.42/ramp;
-        const t = (randInt(3)!==0) ? B_COIN : B_PHONE;
-        SpawnBulletAt(t, BOX_X1+24, rnd(BOX_Y0+16,BOX_Y1-16), -rnd(240,300)*ramp, 0, 12);
+        g_spawnT=0.92/ramp;
+        const spd=300*ramp;
+        if (g_waveN%2===0){                  // 横穿波
+          const N=5, gap=randInt(N), side=randInt(2);
+          const step=(BOX_Y1-BOX_Y0-24)/(N-1);
+          for (let i=0;i<N;++i){
+            if (i===gap||(i+1)%N===gap) continue;
+            const y=BOX_Y0+12+i*step;
+            SpawnBulletAt(B_STAR, side===0?BOX_X0-24:BOX_X1+24, y,
+                          side===0?spd:-spd, 0, 10);
+            g_bullets[g_bullets.length-1].dmg=9;
+          }
+        } else {                             // 纵穿波（多留一个缺口，避免队形封死）
+          const N=4, gap=randInt(N);
+          const step=(BOX_X1-BOX_X0-24)/(N-1);
+          for (let i=0;i<N;++i){
+            if (i===gap||(i+1)%N===gap) continue;
+            const x=BOX_X0+12+i*step;
+            SpawnBulletAt(B_STAR, x, BOX_Y0-24, 0, spd, 10);
+            g_bullets[g_bullets.length-1].dmg=9;
+          }
+        }
+        AddRing(BOX_CX,BOX_CY,50,255,220,120);
+        g_waveN++;
       }
-      // ---- Tenna：邮件
-      if (g_pattern===P_MAIL && g_spawnT<=0){
-        g_spawnT=0.20/ramp;
-        SpawnBulletAt(B_MAIL, rnd(BOX_X0+14,BOX_X1-14), BOX_Y0-18, rnd(-100,100), rnd(195,255)*ramp, 12);
-        if (g_turn>=3)
-          SpawnBulletAt(B_MAIL, rnd(BOX_X0+14,BOX_X1-14), BOX_Y0-34, rnd(-100,100), rnd(195,255)*ramp, 12);
-      }
-      // ---- Tenna：来电
-      if (g_pattern===P_CALL){
-        if (g_knifeWarn<0 && g_spawnT<=0){ g_knifeWarn=0.5; g_warnX=g_heartX; }
+      // ---- Tenna：Smash Cut（屏幕切开 + 闪电五连/三连）
+      if (g_pattern===P_MAIL){
+        if (g_knifeWarn<0 && g_spawnT<=0){
+          g_knifeWarn=0.42;
+          g_warnX=rnd(BOX_X0+24,BOX_X1-24);
+          g_chainN = (g_turn%2===0)?5:3;     // 交替 5 连 / 3 连
+        }
         if (g_knifeWarn>=0){
           g_knifeWarn-=dt;
           if (g_knifeWarn<0){
-            for (let i=0;i<4;++i)
-              SpawnBulletAt(B_PHONE, g_warnX, BOX_Y0-26-i*52, 0, 255*ramp, 14);
-            g_spawnT=1.25/ramp;
+            g_sliceT=0.5;                    // 触发切屏特效
+            g_bullets.push({type:B_PHONE, ring:false, vx:0, vy:0, rot:0, rotv:0,
+              rx:0, r:6, life:0.55, dmg:10, phase:0, bolt:true,
+              x:g_warnX, y:BOX_CY, ang:0, ry:0, w:0, cx:0, cy:0});
+            for (let i=0;i<10;++i)
+              SpawnPart(g_warnX+rnd(-6,6), rnd(BOX_Y0,BOX_Y1), rnd(-60,60),
+                        rnd(-160,-60), rnd(0.2,0.5), rnd(2,5), 200,230,255);
+            AddRing(g_warnX,BOX_CY,70,220,235,255);
+            AddShake(0.2,4);
+            g_chainN--;
+            g_spawnT = (g_chainN>0) ? 0.30 : 1.5/ramp;
           }
         }
       }
-      // ---- Tenna：KROMER 包围
-      if (g_pattern===P_KROMER && g_spawnT<=0){
-        g_spawnT=2.2/ramp;
-        const n=12, gap0=randInt(n);
-        for (let i=0;i<n;++i){
-          const di=(i-gap0+n)%n;
-          if (di<3) continue;
-          const a=i*6.2832/n;
-          const x=BOX_CX+Math.cos(a)*190, y=BOX_CY+Math.sin(a)*85;
-          const spd=150*ramp;
-          SpawnBulletAt(B_COIN, x, y, -Math.cos(a)*spd, -Math.sin(a)*spd*0.6, 11);
+      // ---- Tenna：Rimshot（反弹笑脸星 + 五点发光散弹）
+      if (g_pattern===P_CALL && g_spawnT<=0){
+        g_spawnT=2.3/ramp;
+        for (let k=0;k<2;++k){
+          SpawnBulletAt(B_STAR, k===0?BOX_X0+30:BOX_X1-30,
+                        k===0?BOX_Y0+30:BOX_Y1-30,
+                        (k===0?1:-1)*(110+26*Math.min(g_turn,4)),
+                        (k===0?1:-1)*82, 12);
+          const b=g_bullets[g_bullets.length-1];
+          b.bounce=true; b.tt=4.2; b.dmg=9; b.rotv=4; b.r=12;
+        }
+        const base=rnd(0,6.2832);
+        for (let i=0;i<5;++i){
+          const a=base+i*1.2566;
+          SpawnBulletAt(B_STAR, BOX_CX, BOX_CY,
+                        Math.cos(a)*175*ramp, Math.sin(a)*135*ramp, 10);
+          g_bullets[g_bullets.length-1].dmg=9;
+        }
+        AddRing(BOX_CX,BOX_CY,60,255,220,120);
+      }
+      // ---- Tenna：电视信号横扫
+      if (g_pattern===P_KROMER){
+        if (g_knifeWarn<0 && g_spawnT<=0){
+          g_knifeWarn=0.45; g_warnSide=randInt(2);
+          g_warnY=rnd(BOX_Y0+20,BOX_Y1-20);
+        }
+        if (g_knifeWarn>=0){
+          g_knifeWarn-=dt;
+          if (g_knifeWarn<0){
+            const spd=280*ramp;
+            const N=5, step=(BOX_Y1-BOX_Y0-20)/(N-1);
+            const heroRow=Math.round((g_heartY-BOX_Y0-10)/step);
+            for (let i=0;i<N;++i){
+              const y=BOX_Y0+10+i*step;
+              const far=Math.abs(i-heroRow)>=2;    // 只有远离玩家的行留缝
+              if (far && randInt(3)!==0) continue;
+              SpawnBulletAt(B_PHONE, g_warnSide===0?BOX_X0-24:BOX_X1+24, y,
+                            g_warnSide===0?spd:-spd, 0, 11);
+              g_bullets[g_bullets.length-1].dmg=7;
+            }
+            if (randInt(3)===0){                    // 第二层交错信号
+              const spd2=spd*0.65, side2=1-g_warnSide;
+              for (let i=0;i<N;++i){
+                const y=BOX_Y0+10+(i+0.5)*step;
+                if (y>BOX_Y1-8) continue;
+                if (Math.abs(y-g_heartY)<34) continue;
+                SpawnBulletAt(B_PHONE, side2===0?BOX_X0-24:BOX_X1+24, y,
+                              side2===0?spd2:-spd2, 0, 10);
+                g_bullets[g_bullets.length-1].dmg=7;
+              }
+            }
+            AddShake(0.15,3);
+            g_spawnT=1.35/ramp;
+          }
         }
       }
       // ---- NEO：压缩墙
@@ -574,19 +644,25 @@ function Update(dt){
           }
         }
       }
-      // ---- Pink：白猫冲锋
+      // ---- Pink：三车道猫脸冲锋 + 可拾爱心
       if (g_pattern===P_MAGIC){
-        if (g_waveN<12 && g_spawnT<=0 && g_stateT<B.dur-1.2){
-          g_spawnT=0.95/ramp;
-          const N=4, step=(BOX_Y1-BOX_Y0-30)/(N-1);
-          const gap=randInt(N);
-          const speed=(215+Math.min(g_waveN,5)*20)*ramp;
-          for (let i=0;i<N;++i){
+        if (g_waveN<10 && g_spawnT<=0 && g_stateT<B.dur-1.2){
+          g_spawnT=1.05/ramp;
+          const lanes=[BOX_Y0+22, BOX_CY, BOX_Y1-22];
+          const gap=randInt(3);
+          const speed=(250+Math.min(g_waveN,6)*18)*ramp;
+          for (let i=0;i<3;++i){
             if (i===gap) continue;
-            const y=BOX_Y0+15+i*step;
-            SpawnBulletAt(B_WHITECAT, BOX_X1+24, y, -speed, 0, 10);
+            SpawnBulletAt(B_WHITECAT, BOX_X1+24, lanes[i], -speed, 0, 10);
             const b=g_bullets[g_bullets.length-1];
-            b.dmg=13; b.rotv=0;
+            b.dmg=9; b.rotv=0;
+          }
+          if (g_waveN>=1 && randInt(2)===0){
+            // 爱心走车道缝隙，避免和猫重叠看不清
+            const gapsY=[(lanes[0]+lanes[1])/2, (lanes[1]+lanes[2])/2];
+            SpawnBulletAt(B_HEART, BOX_X1+20, gapsY[randInt(2)], -95*ramp, 0, 12);
+            const b=g_bullets[g_bullets.length-1];
+            b.pick=true; b.dmg=0; b.rotv=0;
           }
           AddRing(BOX_X1-6,BOX_CY,46,255,250,250);
           g_waveN++;
@@ -594,7 +670,7 @@ function Update(dt){
       }
       // ---- Pink：喵喵炸弹
       if (g_pattern===P_LOVE && g_spawnT<=0){
-        g_spawnT=1.10/ramp;
+        g_spawnT=1.55/ramp;                 // Pink 整体 ramp 偏高，单独放宽间隔
         const bias=g_loveN%4;
         let bx;
         if (bias===0)      bx=rnd(BOX_X0+10,BOX_X0+40);
@@ -602,43 +678,47 @@ function Update(dt){
         else               bx=rnd(BOX_X0+10,BOX_X1-10);
         SpawnBulletAt(B_CATBOMB, bx, BOX_Y0-20, 0, rnd(120,155)*ramp, 14);
         const b=g_bullets[g_bullets.length-1];
-        b.life=rnd(0.26,0.95); b.rotv=2.4; b.dmg=10; b.phase=rnd(0,6.28);
+        b.life=rnd(0.26,0.95); b.rotv=2.4; b.dmg=8; b.phase=rnd(0,6.28);
         g_loveN++;
       }
-      // ---- Pink：猫爪
-      if (g_pattern===P_MEOW){
-        if (g_knifeWarn<0 && g_spawnT<=0){
-          g_knifeWarn=0.32; g_warnSide=randInt(4);
-          if (g_warnSide<=1){ g_warnY=g_heartY; g_warnX=0; }
-          else             { g_warnX=g_heartX; g_warnY=0; }
-        }
-        if (g_knifeWarn>=0){
-          g_knifeWarn-=dt;
-          if (g_knifeWarn<0){
-            const spd=430*ramp;
-            if (g_warnSide===0)      SpawnBulletAt(B_PAW, BOX_X0-26, g_warnY,  spd, 0, 15);
-            else if (g_warnSide===1) SpawnBulletAt(B_PAW, BOX_X1+26, g_warnY, -spd, 0, 15);
-            else if (g_warnSide===2) SpawnBulletAt(B_PAW, g_warnX, BOX_Y0-26, 0,  spd, 15);
-            else                     SpawnBulletAt(B_PAW, g_warnX, BOX_Y1+26, 0, -spd, 15);
-            g_bullets[g_bullets.length-1].dmg=15;
-            g_spawnT=0.55/ramp;
-          }
+      // ---- Pink：4x4 炸弹格（爆炸打满整行整列十字）
+      if (g_pattern===P_MEOW && g_spawnT<=0){
+        g_spawnT=1.5/ramp;
+        const nS=(g_turn>=3)?2:1;
+        for (let k=0;k<nS;++k){
+          const gx=randInt(4), gy=randInt(4);
+          const bx=BOX_X0+50+gx*(BOX_X1-BOX_X0-100)/3;
+          const by=BOX_Y0+22+gy*(BOX_Y1-BOX_Y0-44)/3;
+          SpawnBulletAt(B_CATBOMB, bx, by, 0, 0, 14);
+          const b=g_bullets[g_bullets.length-1];
+          b.life=0.7; b.rotv=2.4; b.dmg=8; b.phase=rnd(0,6.28);
+          BurstParts(bx,by,4,60,255,170,200,0.35);
         }
       }
-      // ---- Pink：幽灵分身
+      // ---- Pink：雷达圈扩散 + 追踪爱心
       if (g_pattern===P_GHOST && g_spawnT<=0){
-        g_spawnT=1.25/ramp;
-        for (let k=0;k<2;++k){
-          const a=rnd(0,6.2832);
-          SpawnBulletAt(B_GHOST, BOX_CX+Math.cos(a)*170, BOX_CY+Math.sin(a)*75,
-                        -Math.cos(a)*60, -Math.sin(a)*35, 13);
+        g_spawnT=2.3/ramp;
+        const cx=rnd(BOX_X0+70,BOX_X1-70), cy=rnd(BOX_Y0+34,BOX_Y1-34);
+        const N=14, gap0=randInt(N);
+        for (let i=0;i<N;++i){
+          const di=(i-gap0+N)%N;
+          if (di<4) continue;                    // 留 4 个缺口
+          const a=i*6.2832/N;
+          SpawnBulletAt(B_GHOST, cx+Math.cos(a)*26, cy+Math.sin(a)*26,
+                        Math.cos(a)*95*ramp, Math.sin(a)*95*ramp, 11);
+          g_bullets[g_bullets.length-1].dmg=9;
+        }
+        AddRing(cx,cy,90,255,170,220);
+        if (g_turn>=2 && randInt(2)===0){
+          SpawnBulletAt(B_HEART, BOX_X1+30, rnd(BOX_Y0+20,BOX_Y1-20), -60, 0, 12);
           const b=g_bullets[g_bullets.length-1];
-          b.life=-1; b.dmg=14;
+          b.life=-1; b.tt=6; b.dmg=9;            // 追踪爱心
         }
       }
     }
 
     // ---- 更新子弹（spawned 缓冲防爆）
+    if (g_sliceT>0) g_sliceT-=dt;
     const spawned=[];
     for (const b of g_bullets){
       if (b.type===B_CROSS){
@@ -712,11 +792,33 @@ function Update(dt){
           const sp2=Math.hypot(b.vx,b.vy), maxs=165*ramp;
           if (sp2>maxs){ b.vx*=maxs/sp2; b.vy*=maxs/sp2; }
         }
+        if (b.tt!==undefined){                // 限时消失（反弹星/追踪爱心）
+          b.tt-=dt;
+          if (b.tt<=0){ b.x=-9999; continue; }
+        }
+        if (b.bounce){                        // 板内反弹
+          if (b.x<BOX_X0+10){ b.x=BOX_X0+10; b.vx=Math.abs(b.vx); }
+          if (b.x>BOX_X1-10){ b.x=BOX_X1-10; b.vx=-Math.abs(b.vx); }
+          if (b.y<BOX_Y0+10){ b.y=BOX_Y0+10; b.vy=Math.abs(b.vy); }
+          if (b.y>BOX_Y1-10){ b.y=BOX_Y1-10; b.vy=-Math.abs(b.vy); }
+        }
         b.x+=b.vx*dt; b.y+=b.vy*dt;
         b.rot+=b.rotv*dt;
         if (b.type===B_DIAMOND) b.x+=Math.sin(g_stateT*3+b.phase)*22*dt;
         if (b.type===B_COIN)    b.y+=Math.sin(g_stateT*4+b.phase)*34*dt;
         if (b.type===B_MAIL)    b.x+=Math.sin(g_stateT*3.2+b.phase)*18*dt;
+      }
+      // 爱心拾取
+      if (b.pick){
+        const dx=b.x-g_heartX, dy=b.y-g_heartY;
+        if (dx*dx+dy*dy < (b.r+7)*(b.r+7)*0.80){
+          g_hp=Math.min(PLAYER_MAXHP, g_hp+12);
+          AddRing(b.x,b.y,50,255,120,170);
+          BurstParts(b.x,b.y,10,90,255,170,150,0.5);
+          playSfx("snd_menu_select");
+          b.x=-9999;
+        }
+        continue;
       }
       // 碰撞
       const dx=b.x-g_heartX, dy=b.y-g_heartY;
@@ -727,6 +829,7 @@ function Update(dt){
     g_bullets = g_bullets.filter(b=>{
       if (b.ring) return true;
       if ((b.type===B_BOMB||b.type===B_CATBOMB) && b.life<=-2) return false;
+      if (b.pick) return !(b.x<BOX_X0-40);
       if (b.type===B_WHITECAT) return !(b.x<BOX_X0-90);
       return !(b.x<BOX_X0-60 || b.x>BOX_X1+60 || b.y<BOX_Y0-60 || b.y>BOX_Y1+60);
     });
@@ -886,7 +989,10 @@ let crtCanvas = null, crtDirty = true;
 function fitCanvas(){
   const dpr = window.devicePixelRatio || 1;
   SS = clamp(Math.round(dpr*10)/10, 1, 2);   // 最高 2 倍超采样，兼顾手机性能
-  const ww = window.innerWidth, wh = window.innerHeight;
+  // 用 documentElement.clientWidth/Height：比 innerHeight 更贴近可视区，
+  // 手机地址栏/工具栏占位导致 innerHeight 偏大时不会把底部 UI 挤出屏幕
+  const ww = document.documentElement.clientWidth  || window.innerWidth;
+  const wh = document.documentElement.clientHeight || window.innerHeight;
   const ar = ww/wh;
   if (ar >= 1){                              // 横屏：高度固定 480，宽度铺满（不限上限，避免两侧留黑）
     WINH = 480;
@@ -898,14 +1004,19 @@ function fitCanvas(){
   VOX = (WINW-640)/2;
   VOY = Math.max(0, Math.round((WINH-480-58)/2));   // 底部留出 UI 高度后整体居中
   crtDirty = true;
-  // 显示尺寸由 CSS 的 100vw/100vh 决定（像素缓冲直接按屏幕尺寸），
-  // WINW/WINH 与屏幕等比，所以拉伸到视口时不会变形
-  cv.width  = Math.max(1, Math.round(ww*Math.min(SS,1.5)));
-  cv.height = Math.max(1, Math.round(wh*Math.min(SS,1.5)));
+  // 画布缓冲按逻辑尺寸等比放大：x/y 缩放比完全一致，
+  // 不会因为 innerHeight/innerWidth 的取整差异把底部按钮挤出可视区
+  cv.width  = Math.max(1, Math.round(WINW*Math.min(SS,1.5)));
+  cv.height = Math.max(1, Math.round(WINH*Math.min(SS,1.5)));
+  cv.style.width  = ww + "px";
+  cv.style.height = wh + "px";
   const hint = document.getElementById("rotate");
   if (hint) hint.style.display = "none";     // 竖屏也能全屏显示，不再强制横屏
 }
 window.addEventListener("resize", fitCanvas);
+window.addEventListener("orientationchange", ()=>{ setTimeout(fitCanvas,120); });
+// 移动端地址栏收起/展开会改变可视区高度，visualViewport 变化时重算
+if (window.visualViewport) window.visualViewport.addEventListener("resize", fitCanvas);
 fitCanvas();
 
 function img(n){ const im=IMG[n]; return (im && im.naturalWidth) ? im : null; }
@@ -1048,7 +1159,10 @@ function roundRect(x,y,w,h,r){
 // ---- 战斗渲染主函数
 function Render(){
   hotspots = [];
-  ctx.setTransform(cv.width/WINW, 0, 0, cv.height/WINH, 0, 0);
+  // 等比缩放：x/y 用同一个比例，避免两轴独立缩放时的浮点误差
+  // 在高分辨率竖屏累积几十像素，把底部按钮推出画布
+  const sc = Math.min(cv.width/WINW, cv.height/WINH);
+  ctx.setTransform(sc, 0, 0, sc, 0, 0);
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
@@ -1189,7 +1303,8 @@ function Render(){
       // 激光
       if (b.life>0 && !b.ring && b.vx===0 && b.vy===0){
         const a=Math.min(1, b.life*2.5);
-        ctx.fillStyle=`rgba(255,90,120,${0.78*a})`;
+        const lc = b.bolt ? "210,232,255" : "255,90,120";
+        ctx.fillStyle=`rgba(${lc},${0.78*a})`;
         if (b.rx>0.5){
           ctx.fillRect(BOX_X0, b.y-9, BOX_X1-BOX_X0, 18);
           ctx.strokeStyle=`rgba(255,240,240,${a})`; ctx.lineWidth=2;
@@ -1291,9 +1406,15 @@ function Render(){
   if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5)
     outlineText("按住屏幕出摇杆 拖动方向躲避", 0, VOY+424, 14, "#c8d8ff", WINW/2, false);
 
-  // ---- 底部 UI（贴屏幕底边）
+  // ---- 底部 UI（贴屏幕底边，预留手机手势条/安全区）
+  let SAFE_B = 0;
+  try {
+    const pp = getComputedStyle(document.documentElement).getPropertyValue("--sab").trim();
+    SAFE_B = parseFloat(pp) || 0;
+  } catch(e){ SAFE_B = 0; }
+  const UI_BOT = WINH - SAFE_B;          // 底部 UI 的基准线
   if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_INTRO){
-    const byy = WINH-72;
+    const byy = UI_BOT-72;
     outlineText("HP", 14, byy-4, 22, "#ffe678", -1);
     ctx.fillStyle="rgba(40,15,25,0.86)"; ctx.fillRect(46,byy,110,18);
     ctx.fillStyle="#ffc850"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),18);
@@ -1306,7 +1427,7 @@ function Render(){
     const rowW = 3*102+98;
     const rowX = (WINW-rowW)/2;
     for (let i=0;i<4;++i){
-      let bx=rowX+i*102, by=WINH-46, bw=98, bh=34;
+      let bx=rowX+i*102, by=UI_BOT-50, bw=98, bh=34;
       const sel = (g_state===ST_MENU && g_btnSel===i);
       if (sel){ bw+=8; bh+=6; bx-=4; by-=3;
         ctx.strokeStyle="rgba(255,255,255,0.63)"; ctx.lineWidth=2;
@@ -1471,36 +1592,91 @@ function renderWarn(pulse){
       drawImg(kn,g_heartX,BOX_Y1-26,40,40,0);
       ctx.restore(); }
     break; }
-  case P_DEAL: {
-    const cn=img("coin");
-    if (cn){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      for (let i=0;i<4;++i){
-        const ax=(i&1)?BOX_X1-30:BOX_X0+30, ay=(i&2)?BOX_Y1-30:BOX_Y0+30;
-        const k2=(g_animT*1.6+i*0.25)%1;
-        drawImg(cn, ax+(BOX_CX-ax)*k2*0.4, ay+(BOX_CY-ay)*k2*0.4, 28,28, g_animT*300);
+  case P_DEAL: {  // All-Star Cast：星星环穿 + 屏幕明暗
+    const dim=0.22+0.13*Math.sin(g_animT*7);
+    ctx.fillStyle=`rgba(6,2,16,${dim})`;
+    ctx.fillRect(0,0,640,480);
+    const st=img("star");
+    // 环绕星星
+    if (st){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      for (let i=0;i<8;++i){
+        const a=g_animT*2.4+i*0.7854;
+        drawImg(st, BOX_CX+Math.cos(a)*176, BOX_CY+Math.sin(a)*74, 30,30, g_animT*260);
       } ctx.restore(); }
+    // 四边射出箭头提示
+    ctx.strokeStyle=`rgba(255,225,140,${(120+110*pulse)/255})`;
+    ctx.lineWidth=2.5;
+    for (let i=0;i<3;++i){
+      const y=BOX_Y0+22+i*(BOX_Y1-BOX_Y0-44)/2;
+      const k=((g_animT*1.1+i*0.33)%1);
+      const x0=BOX_X0+6+k*26;
+      ctx.beginPath();
+      ctx.moveTo(x0,y-7); ctx.lineTo(x0+9,y); ctx.lineTo(x0,y+7);
+      ctx.moveTo(BOX_X1-6-k*26,y-7); ctx.lineTo(BOX_X1-15-k*26,y); ctx.lineTo(BOX_X1-6-k*26,y+7);
+      ctx.stroke();
+    }
     ctx.strokeStyle=`rgba(255,230,160,${(90+100*pulse)/255})`;
     ctx.lineWidth=2;
     ctx.strokeRect(BOX_X0,BOX_Y0,BOX_X1-BOX_X0,BOX_Y1-BOX_Y0);
     break; }
-  case P_CALL: {
-    for (let i=0;i<6;++i){
-      const x=BOX_X0+30+i*(BOX_X1-BOX_X0-60)/5;
-      ctx.strokeStyle=`rgba(120,255,160,${(60+120*Math.sin(g_animT*8+i))/255})`;
-      ctx.lineWidth=2;
-      ctx.beginPath(); ctx.moveTo(x,BOX_Y0+6); ctx.lineTo(x,BOX_Y1-6); ctx.stroke();
+  case P_MAIL: {  // Smash Cut：上下两半错位滑开
+    const k = Math.max(0, g_sliceT)/0.5;
+    if (k>0.02){
+      const kh=k*30;                      // 上下半屏滑开距离
+      ctx.fillStyle=`rgba(8,4,20,${0.45*k})`;
+      ctx.fillRect(-640,0,1920,BOX_CY-4);
+      ctx.fillRect(-640,BOX_CY+4,1920,480-BOX_CY-4);
+      ctx.fillStyle=`rgba(255,255,255,${0.10*k})`;
+      ctx.fillRect(-640,BOX_CY-4-kh*0.15,1920,kh*0.15);
+      ctx.fillRect(-640,BOX_CY+4,1920,kh*0.15);
+      ctx.strokeStyle=`rgba(235,248,255,${k})`;
+      ctx.lineWidth=3;
+      ctx.beginPath();
+      ctx.moveTo(BOX_X0,BOX_CY-kh*0.15); ctx.lineTo(BOX_X1,BOX_CY-kh*0.15);
+      ctx.moveTo(BOX_X0,BOX_CY+kh*0.15); ctx.lineTo(BOX_X1,BOX_CY+kh*0.15);
+      ctx.stroke();
+    }
+    // 落雷位置提示虚线
+    ctx.strokeStyle=`rgba(200,230,255,${(110+120*pulse)/255})`;
+    ctx.lineWidth=1.5;
+    ctx.setLineDash([7,7]);
+    ctx.beginPath(); ctx.moveTo(g_warnX,BOX_Y0); ctx.lineTo(g_warnX,BOX_Y1); ctx.stroke();
+    ctx.setLineDash([]);
+    const ph=img("phone");
+    if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      drawImg(ph,g_warnX,BOX_Y0+16,30,30,Math.sin(g_animT*22)*14); ctx.restore(); }
+    break; }
+  case P_CALL: {  // Rimshot：反弹星 + 五点散弹
+    const st=img("star");
+    if (st){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      drawImg(st,BOX_X0+34,BOX_Y0+34,26,26,g_animT*300);
+      drawImg(st,BOX_X1-34,BOX_Y1-34,26,26,-g_animT*300);
+      ctx.restore(); }
+    ctx.fillStyle=`rgba(255,220,120,${(120+120*pulse)/255})`;
+    for (let i=0;i<5;++i){
+      const a=g_animT*3+i*1.2566;
+      ctx.beginPath();
+      ctx.arc(BOX_CX+Math.cos(a)*46, BOX_CY+Math.sin(a)*36, 5,0,6.29); ctx.fill();
+    }
+    break; }
+  case P_KROMER: {  // 电视信号横扫
+    const y=BOX_Y0+20+((g_animT*40)%(BOX_Y1-BOX_Y0-40));
+    const grd=ctx.createLinearGradient(0,y-12,0,y+12);
+    grd.addColorStop(0,"rgba(120,255,190,0)");
+    grd.addColorStop(0.5,`rgba(150,255,210,${(120+90*pulse)/255})`);
+    grd.addColorStop(1,"rgba(120,255,190,0)");
+    ctx.fillStyle=grd;
+    ctx.fillRect(BOX_X0,y-12,BOX_X1-BOX_X0,24);
+    // 扫描条纹
+    for (let i=0;i<4;++i){
+      const sy=BOX_Y0+((g_animT*36+i*24)%(BOX_Y1-BOX_Y0));
+      ctx.strokeStyle="rgba(180,255,220,0.20)";
+      ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(BOX_X0+2,sy); ctx.lineTo(BOX_X1-2,sy); ctx.stroke();
     }
     const ph=img("phone");
     if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      drawImg(ph,BOX_CX,BOX_CY-26,34,34,Math.sin(g_animT*22)*14); ctx.restore(); }
-    break; }
-  case P_KROMER: {
-    const cn=img("coin");
-    if (cn){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      for (let i=0;i<8;++i){
-        const a=g_animT*2.2+i*0.785;
-        drawImg(cn, BOX_CX+Math.cos(a)*120, BOX_CY+Math.sin(a)*58, 26,26, g_animT*240);
-      } ctx.restore(); }
+      drawImg(ph,BOX_CX,y,30,30,Math.sin(g_animT*10)*20); ctx.restore(); }
     break; }
   case P_CRUSHER: {
     ctx.strokeStyle=`rgba(255,150,150,${(140+110*pulse)/255})`;
@@ -1549,12 +1725,12 @@ function renderWarn(pulse){
       ctx.beginPath(); ctx.moveTo(BOX_X0+2,y); ctx.lineTo(BOX_X1-2,y); ctx.stroke();
     }
     break;
-  case P_MAGIC: {
-    const N=4, step=(BOX_Y1-BOX_Y0-30)/(N-1);
-    const gap=Math.floor(g_animT*1.6)%N;
-    const wc=img("whitecat");
-    for (let i=0;i<N;++i){
-      const y=BOX_Y0+15+i*step;
+  case P_MAGIC: {  // 三车道 + 爱心
+    const lanes=[BOX_Y0+22, BOX_CY, BOX_Y1-22];
+    const gap=Math.floor(g_animT*1.4)%3;
+    const wc=img("whitecat"), ht=img("heart");
+    for (let i=0;i<3;++i){
+      const y=lanes[i];
       if (i===gap){
         ctx.strokeStyle=`rgba(255,250,250,${(120+120*pulse)/255})`;
         ctx.lineWidth=2.5;
@@ -1569,6 +1745,8 @@ function renderWarn(pulse){
         drawImg(wc,BOX_X1-22,y,27,27,0); ctx.restore();
       }
     }
+    if (ht){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      drawImg(ht,BOX_X0+30,BOX_CY+Math.sin(g_animT*4)*8,24,24,0); ctx.restore(); }
     break; }
   case P_LOVE: {
     ctx.strokeStyle=`rgba(255,140,190,${(150+100*pulse)/255})`;
@@ -1586,23 +1764,26 @@ function renderWarn(pulse){
       drawImg(cb,BOX_CX+46,BOX_CY-20-Math.cos(g_animT*4)*4,24,24,g_animT*50);
       ctx.restore(); }
     break; }
-  case P_MEOW: {
-    const side=[[-1,0],[1,0],[0,-1],[0,1]];
-    const pn=img("paw");
-    if (pn){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      for (let i=0;i<4;++i){
-        const x=BOX_CX+side[i][0]*(60+18*pulse);
-        const y=BOX_CY+side[i][1]*(44+14*pulse);
-        drawImg(pn,x,y,32,32,Math.atan2(side[i][1],side[i][0])*57.3+90);
-      } ctx.restore(); }
+  case P_MEOW: {  // 4x4 炸弹格
+    for (let gy=0;gy<4;++gy) for (let gx=0;gx<4;++gx){
+      const x=BOX_X0+50+gx*(BOX_X1-BOX_X0-100)/3;
+      const y=BOX_Y0+22+gy*(BOX_Y1-BOX_Y0-44)/3;
+      const sel=((gx*4+gy+Math.floor(g_animT*2.2))%6===0);
+      ctx.fillStyle=`rgba(255,140,190,${sel?(150+100*pulse)/255:0.24})`;
+      ctx.beginPath(); ctx.arc(x,y,sel?5:2.5,0,6.29); ctx.fill();
+    }
+    const bn=img("catbomb");
+    if (bn){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      drawImg(bn,BOX_CX,BOX_CY,30,30,g_animT*80); ctx.restore(); }
     break; }
-  case P_GHOST: {
-    const gn=img("ghost");
-    if (gn){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      for (let i=0;i<4;++i){
-        const a=g_animT*1.8+i*1.5708;
-        drawImg(gn,BOX_CX+Math.cos(a)*128,BOX_CY+Math.sin(a)*60,32,32,0);
-      } ctx.restore(); }
+  case P_GHOST: {  // 雷达圈
+    const rr=20+((g_animT*60)%70);
+    const fade=Math.max(0,1-rr/90);
+    ctx.strokeStyle=`rgba(255,170,220,${fade})`;
+    ctx.lineWidth=2;
+    ctx.beginPath(); ctx.ellipse(BOX_CX,BOX_CY,rr,rr*0.6,0,0,6.29); ctx.stroke();
+    ctx.strokeStyle=`rgba(255,170,220,${fade*0.6})`;
+    ctx.beginPath(); ctx.ellipse(BOX_CX,BOX_CY,rr*0.55,rr*0.33,0,0,6.29); ctx.stroke();
     break; }
   default: {  // 梅花喷泉
     const sp=img("sparkle"), cl=img("club");
