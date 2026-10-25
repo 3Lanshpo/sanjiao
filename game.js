@@ -59,7 +59,7 @@ const BOSSES = [
   pat:[P_DEAL,P_MAIL,P_CALL,P_KROMER], patW:1.12,
   line:["欢迎来到[大奖赛]！各位观众！","[收视率]就是我的生命！",
         "别换台！好戏才刚开始！","[独家直播]！只要你的灵魂！","别想逃！镜头已经锁定你了！"],
-  patLine:["All-Star Cast！星星穿板！","Smash Cut！切开屏幕！","Rimshot！反弹星星！","电视波！横扫全场！"],
+  patLine:["All-Star Cast！星星穿板！","Smash Cut！屏幕切开！","Rimshot！反弹星星！","信号波！蛇行穿插！"],
   actNeed:5, check:"Tenna  攻击78  防御6  全城收视冠军" },
 { name:"大人物", title:"BIG SHOT　·　SPAMTON NEO", bgm:"bgm_spamton.mp3",
   maxhp:1500, warn:0.90, dur:13.0,
@@ -96,6 +96,8 @@ let g_waveN=0, g_fired=false, g_afterDialog=ST_MENU;
 let g_animT=0;
 let g_loveN=0, g_spiralA=0;                    // C++ static 变量
 let g_sliceT=0, g_chainN=0;                    // Tenna 切屏特效 / 闪电连击数
+let g_gridWarn=[];                             // Pink 炸弹格：待引爆的格子
+let g_sliceCv=null, g_sliceCtx=null;           // 切屏后处理用的临时画布
 
 // 特效
 let g_shakeT=0, g_shakeMag=0, g_hitStop=0, g_whiteFlash=0;
@@ -262,7 +264,7 @@ function SpawnPattern(){
   if (g_pattern===g_lastPat) g_pattern = B.pat[randInt(3)];
   g_lastPat = g_pattern;
   g_bullets=[];
-  g_spawnT=0.2; g_knifeWarn=-1; g_fired=false; g_waveN=0; g_sliceT=0; g_chainN=0;
+  g_spawnT=0.2; g_knifeWarn=-1; g_fired=false; g_waveN=0; g_sliceT=0; g_chainN=0; g_gridWarn.length=0;
   g_heartX=BOX_CX; g_heartY=BOX_CY;
   for (let i=0;i<4;i++) if (B.pat[i]===g_pattern){ Say(B.patLine[i]); break; }
   if (g_boss===0) playVoice(randInt(2)===0 ? "Jevil_voiceclip_CHAOS.wav" : "Jevil_voiceclip_ANYTHING.wav");
@@ -504,27 +506,27 @@ function Update(dt){
         AddRing(BOX_CX,BOX_CY,50,255,220,120);
         g_waveN++;
       }
-      // ---- Tenna：Smash Cut（屏幕切开 + 闪电五连/三连）
+      // ---- Tenna：Smash Cut（真实切屏 + 闪电五连/三连）
       if (g_pattern===P_MAIL){
         if (g_knifeWarn<0 && g_spawnT<=0){
-          g_knifeWarn=0.42;
+          g_knifeWarn=0.36;
           g_warnX=rnd(BOX_X0+24,BOX_X1-24);
           g_chainN = (g_turn%2===0)?5:3;     // 交替 5 连 / 3 连
         }
         if (g_knifeWarn>=0){
           g_knifeWarn-=dt;
           if (g_knifeWarn<0){
-            g_sliceT=0.5;                    // 触发切屏特效
+            g_sliceT=1.3;                    // 切屏保持 1.3s（连击期间一直开着）
             g_bullets.push({type:B_PHONE, ring:false, vx:0, vy:0, rot:0, rotv:0,
-              rx:0, r:6, life:0.55, dmg:10, phase:0, bolt:true,
+              rx:0, r:6, life:0.5, dmg:11, phase:0, bolt:true,
               x:g_warnX, y:BOX_CY, ang:0, ry:0, w:0, cx:0, cy:0});
-            for (let i=0;i<10;++i)
-              SpawnPart(g_warnX+rnd(-6,6), rnd(BOX_Y0,BOX_Y1), rnd(-60,60),
-                        rnd(-160,-60), rnd(0.2,0.5), rnd(2,5), 200,230,255);
-            AddRing(g_warnX,BOX_CY,70,220,235,255);
-            AddShake(0.2,4);
+            for (let i=0;i<12;++i)
+              SpawnPart(g_warnX+rnd(-6,6), rnd(BOX_Y0,BOX_Y1), rnd(-70,70),
+                        rnd(-180,-60), rnd(0.2,0.5), rnd(2,5), 200,230,255);
+            AddRing(g_warnX,BOX_CY,80,220,235,255);
+            AddShake(0.22,5);
             g_chainN--;
-            g_spawnT = (g_chainN>0) ? 0.30 : 1.5/ramp;
+            g_spawnT = (g_chainN>0) ? 0.24 : 1.35/ramp;
           }
         }
       }
@@ -548,39 +550,30 @@ function Update(dt){
         }
         AddRing(BOX_CX,BOX_CY,60,255,220,120);
       }
-      // ---- Tenna：电视信号横扫
+      // ---- Tenna：电视信号波（竖向信号墙横扫，缺口蛇形移动）
       if (g_pattern===P_KROMER){
-        if (g_knifeWarn<0 && g_spawnT<=0){
-          g_knifeWarn=0.45; g_warnSide=randInt(2);
-          g_warnY=rnd(BOX_Y0+20,BOX_Y1-20);
-        }
-        if (g_knifeWarn>=0){
+        if (!g_fired){                              // 预警阶段
+          if (g_knifeWarn<0){ g_knifeWarn=0.45; g_warnSide=randInt(2); g_waveN=0; }
           g_knifeWarn-=dt;
-          if (g_knifeWarn<0){
-            const spd=280*ramp;
-            const N=5, step=(BOX_Y1-BOX_Y0-20)/(N-1);
-            const heroRow=Math.round((g_heartY-BOX_Y0-10)/step);
-            for (let i=0;i<N;++i){
-              const y=BOX_Y0+10+i*step;
-              const far=Math.abs(i-heroRow)>=2;    // 只有远离玩家的行留缝
-              if (far && randInt(3)!==0) continue;
-              SpawnBulletAt(B_PHONE, g_warnSide===0?BOX_X0-24:BOX_X1+24, y,
-                            g_warnSide===0?spd:-spd, 0, 11);
-              g_bullets[g_bullets.length-1].dmg=7;
+          if (g_knifeWarn<0){ g_fired=true; g_spawnT=0; }
+        } else {                                    // 逐道信号墙推进
+          if (g_spawnT<=0 && g_stateT<B.dur-1.5){
+            g_spawnT=0.62/ramp;
+            const spd=(215+40*Math.min(g_turn,5))*ramp;
+            const step=20;
+            // 高回合交替反向出手，形成交叉信号墙
+            const side=(g_turn>=3 && (g_waveN%2===1)) ? 1-g_warnSide : g_warnSide;
+            const gapY=BOX_CY+Math.sin(g_waveN*1.15)*50;   // 缺口蛇形移动
+            for (let y=BOX_Y0+10; y<=BOX_Y1-10; y+=step){
+              if (Math.abs(y-gapY)<38) continue;           // 缺口
+              const px=side===0 ? BOX_X0-8 : BOX_X1+8;
+              SpawnBulletAt(B_PHONE, px, y, side===0?spd:-spd, 0, 10);
+              const b=g_bullets[g_bullets.length-1];
+              b.dmg=8; b.phase=(y-BOX_Y0)*0.075; b.wavy=15; b.wy=y;
             }
-            if (randInt(3)===0){                    // 第二层交错信号
-              const spd2=spd*0.65, side2=1-g_warnSide;
-              for (let i=0;i<N;++i){
-                const y=BOX_Y0+10+(i+0.5)*step;
-                if (y>BOX_Y1-8) continue;
-                if (Math.abs(y-g_heartY)<34) continue;
-                SpawnBulletAt(B_PHONE, side2===0?BOX_X0-24:BOX_X1+24, y,
-                              side2===0?spd2:-spd2, 0, 10);
-                g_bullets[g_bullets.length-1].dmg=7;
-              }
-            }
-            AddShake(0.15,3);
-            g_spawnT=1.35/ramp;
+            AddShake(0.12,2.5);
+            g_waveN++;
+            if (g_waveN>=7){ g_fired=false; g_knifeWarn=-1; g_waveN=0; g_spawnT=0.5; }
           }
         }
       }
@@ -681,18 +674,21 @@ function Update(dt){
         b.life=rnd(0.26,0.95); b.rotv=2.4; b.dmg=8; b.phase=rnd(0,6.28);
         g_loveN++;
       }
-      // ---- Pink：4x4 炸弹格（爆炸打满整行整列十字）
+      // ---- Pink：4x4 炸弹格（预告闪烁 → 整行整列十字同时引爆）
       if (g_pattern===P_MEOW && g_spawnT<=0){
-        g_spawnT=1.5/ramp;
-        const nS=(g_turn>=3)?2:1;
-        for (let k=0;k<nS;++k){
-          const gx=randInt(4), gy=randInt(4);
-          const bx=BOX_X0+50+gx*(BOX_X1-BOX_X0-100)/3;
-          const by=BOX_Y0+22+gy*(BOX_Y1-BOX_Y0-44)/3;
-          SpawnBulletAt(B_CATBOMB, bx, by, 0, 0, 14);
-          const b=g_bullets[g_bullets.length-1];
-          b.life=0.7; b.rotv=2.4; b.dmg=8; b.phase=rnd(0,6.28);
-          BurstParts(bx,by,4,60,255,170,200,0.35);
+        g_spawnT=1.05/ramp;
+        const total=(g_turn>=6)?3:(g_turn>=4)?2:1;
+        const used=[];
+        for (let k=0;k<total;++k){
+          let gx=0, gy=0, ok=false;
+          for (let tr=0;tr<10 && !ok;++tr){
+            gx=randInt(4); gy=randInt(4);
+            ok=!used.some(c=>c[0]===gx&&c[1]===gy);
+          }
+          used.push([gx,gy]);
+          g_gridWarn.push({gx,gy,t:1.05/ramp});
+          const cw=(BOX_X1-BOX_X0-100)/3, ch=(BOX_Y1-BOX_Y0-44)/3;
+          BurstParts(BOX_X0+50+gx*cw, BOX_Y0+22+gy*ch, 5,80,255,170,210,0.4);
         }
       }
       // ---- Pink：雷达圈扩散 + 追踪爱心
@@ -719,6 +715,27 @@ function Update(dt){
 
     // ---- 更新子弹（spawned 缓冲防爆）
     if (g_sliceT>0) g_sliceT-=dt;
+    // 炸弹格引信：到点后整行整列十字瞬间打满
+    if (g_gridWarn.length){
+      for (const w of g_gridWarn){
+        w.t-=dt;
+        if (w.t<=0 && !w.fired){
+          w.fired=true;
+          const cw=(BOX_X1-BOX_X0-100)/3, ch=(BOX_Y1-BOX_Y0-44)/3;
+          const bx=BOX_X0+50+w.gx*cw, by=BOX_Y0+22+w.gy*ch;
+          const dir4=[[1,0],[-1,0],[0,1],[0,-1]];
+          for (let i=0;i<4;++i){
+            g_bullets.push({type:B_CROSS, ring:false, x:bx, y:by,
+              vx:dir4[i][0], vy:dir4[i][1], rot:0, rotv:0, r:11, dmg:10,
+              life:660, phase:0, ang:0, rx:0, ry:0, w:0, cx:0, cy:0});
+          }
+          AddRing(bx,by,80,255,150,190);
+          BurstParts(bx,by,16,200,255,140,180,0.55);
+          AddShake(0.32,6);
+        }
+      }
+      g_gridWarn=g_gridWarn.filter(w=>!w.fired);
+    }
     const spawned=[];
     for (const b of g_bullets){
       if (b.type===B_CROSS){
@@ -807,6 +824,10 @@ function Update(dt){
         if (b.type===B_DIAMOND) b.x+=Math.sin(g_stateT*3+b.phase)*22*dt;
         if (b.type===B_COIN)    b.y+=Math.sin(g_stateT*4+b.phase)*34*dt;
         if (b.type===B_MAIL)    b.x+=Math.sin(g_stateT*3.2+b.phase)*18*dt;
+        if (b.wavy){                           // 蛇行波：绕基准线正弦摆动
+          b.wt=(b.wt||0)+dt;
+          b.y=b.wy+Math.sin(b.wt*5.5+b.phase)*b.wavy;
+        }
       }
       // 爱心拾取
       if (b.pick){
@@ -1265,10 +1286,12 @@ function Render(){
     ctx.lineWidth=3;
     ctx.strokeRect(BOX_X0,BOX_Y0,BOX_X1-BOX_X0,BOX_Y1-BOX_Y0);
     renderWarn(pulse);
-    // 技能名
+    // 技能名：压到框上沿，不再遮挡框内预告图形
     let nm="混沌！";
     for (let i=0;i<4;++i) if (Boss().pat[i]===g_pattern){ nm=Boss().patLine[i]; break; }
-    outlineText(nm, 0, BOX_CY-22, 34, `rgba(255,${Math.floor(90+120*pulse)},${Math.floor(90+60*pulse)},1)`, WINW/2);
+    ctx.fillStyle="rgba(12,8,24,0.72)";
+    ctx.fillRect(BOX_CX-190, BOX_Y0-19, 380, 22);
+    outlineText(nm, 0, BOX_Y0-16, 17, `rgba(255,${Math.floor(110+110*pulse)},${Math.floor(110+60*pulse)},1)`, WINW/2, false);
   }
 
   // ---- 子弹
@@ -1398,6 +1421,41 @@ function Render(){
   }
   ctx.restore();   // 场景坐标系结束
   ctx.restore();   // 震屏结束
+
+  // ---- Smash Cut：真实切屏后处理（沿战斗框中线把画面切成两半滑开）
+  if (g_sliceT>0 && g_state===ST_ATTACK){
+    const life=1.3, el=life-g_sliceT;
+    const open = el<0.28 ? el/0.28 : (g_sliceT<0.28 ? g_sliceT/0.28 : 1);
+    const dx=80*open;
+    if (dx>1){
+      const rw=cv.width/WINW, rh=cv.height/WINH;
+      const vh=WINH;                             // 整屏切分（UI 在这之后才画，不受影响）
+      const seam=Math.round(VOY+BOX_CY);         // 中缝：战斗框中线
+      const topH=Math.max(1,seam), botH=Math.max(1,vh-seam);
+      const sw=WINW*rw, sh=vh*rh;
+      if (!g_sliceCv){ g_sliceCv=document.createElement("canvas"); g_sliceCtx=g_sliceCv.getContext("2d"); }
+      g_sliceCv.width=Math.max(1,Math.round(sw)); g_sliceCv.height=Math.max(1,Math.round(sh));
+      g_sliceCtx.drawImage(cv, 0,0,sw,sh, 0,0,g_sliceCv.width,g_sliceCv.height);
+      // 虚空：深色 + 电视噪点
+      ctx.fillStyle="#07040e"; ctx.fillRect(0,0,WINW,WINH);
+      for (let i=0;i<90;++i){
+        const ny=rnd(0,WINH), nx=rnd(0,WINW);
+        ctx.fillStyle=`rgba(${90+rnd(0,90)|0},${140+rnd(0,80)|0},${200+rnd(0,55)|0},${rnd(0.10,0.42)})`;
+        ctx.fillRect(nx, ny, rnd(2,14), 1.5);
+      }
+      const hy=g_sliceCv.height*seam/vh;
+      ctx.drawImage(g_sliceCv, 0,0, g_sliceCv.width, hy, dx, 0, WINW, topH);
+      ctx.drawImage(g_sliceCv, 0,hy, g_sliceCv.width, g_sliceCv.height-hy,
+                    -dx, seam, WINW, botH);
+      // 切口白热边
+      const gl=0.6+0.35*Math.sin(g_animT*36);
+      ctx.fillStyle=`rgba(228,242,255,${gl*open})`;
+      ctx.fillRect(-dx-8, seam-3, WINW+dx*2+16, 5);
+      ctx.fillStyle=`rgba(130,170,255,${0.4*open})`;
+      ctx.fillRect(-dx-8, seam-11, WINW+dx*2+16, 2);
+      ctx.fillRect(-dx-8, seam+8, WINW+dx*2+16, 2);
+    }
+  }
 
   // ---- 字幕
   if (g_subtitle)
@@ -1619,23 +1677,7 @@ function renderWarn(pulse){
     ctx.lineWidth=2;
     ctx.strokeRect(BOX_X0,BOX_Y0,BOX_X1-BOX_X0,BOX_Y1-BOX_Y0);
     break; }
-  case P_MAIL: {  // Smash Cut：上下两半错位滑开
-    const k = Math.max(0, g_sliceT)/0.5;
-    if (k>0.02){
-      const kh=k*30;                      // 上下半屏滑开距离
-      ctx.fillStyle=`rgba(8,4,20,${0.45*k})`;
-      ctx.fillRect(-640,0,1920,BOX_CY-4);
-      ctx.fillRect(-640,BOX_CY+4,1920,480-BOX_CY-4);
-      ctx.fillStyle=`rgba(255,255,255,${0.10*k})`;
-      ctx.fillRect(-640,BOX_CY-4-kh*0.15,1920,kh*0.15);
-      ctx.fillRect(-640,BOX_CY+4,1920,kh*0.15);
-      ctx.strokeStyle=`rgba(235,248,255,${k})`;
-      ctx.lineWidth=3;
-      ctx.beginPath();
-      ctx.moveTo(BOX_X0,BOX_CY-kh*0.15); ctx.lineTo(BOX_X1,BOX_CY-kh*0.15);
-      ctx.moveTo(BOX_X0,BOX_CY+kh*0.15); ctx.lineTo(BOX_X1,BOX_CY+kh*0.15);
-      ctx.stroke();
-    }
+  case P_MAIL: {  // Smash Cut：落雷位置预告（切屏本体在 Render 后处理）
     // 落雷位置提示虚线
     ctx.strokeStyle=`rgba(200,230,255,${(110+120*pulse)/255})`;
     ctx.lineWidth=1.5;
@@ -1659,24 +1701,32 @@ function renderWarn(pulse){
       ctx.arc(BOX_CX+Math.cos(a)*46, BOX_CY+Math.sin(a)*36, 5,0,6.29); ctx.fill();
     }
     break; }
-  case P_KROMER: {  // 电视信号横扫
-    const y=BOX_Y0+20+((g_animT*40)%(BOX_Y1-BOX_Y0-40));
-    const grd=ctx.createLinearGradient(0,y-12,0,y+12);
-    grd.addColorStop(0,"rgba(120,255,190,0)");
-    grd.addColorStop(0.5,`rgba(150,255,210,${(120+90*pulse)/255})`);
-    grd.addColorStop(1,"rgba(120,255,190,0)");
-    ctx.fillStyle=grd;
-    ctx.fillRect(BOX_X0,y-12,BOX_X1-BOX_X0,24);
-    // 扫描条纹
+  case P_KROMER: {  // 电视信号墙：竖列墙 + 缺口预览
+    const side = g_warnSide||0;
+    const gapY = BOX_CY+Math.sin(g_waveN*1.15)*50;
+    // 缺口位置
+    ctx.fillStyle=`rgba(120,255,190,${(60+70*pulse)/255})`;
+    ctx.fillRect(BOX_X0, gapY-38, BOX_X1-BOX_X0, 76);
+    ctx.strokeStyle=`rgba(150,255,210,${(140+90*pulse)/255})`;
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(BOX_X0+4,gapY-38); ctx.lineTo(BOX_X1-4,gapY-38);
+    ctx.moveTo(BOX_X0+4,gapY+38); ctx.lineTo(BOX_X1-4,gapY+38);
+    ctx.stroke();
+    // 发射侧信号条
+    const ph=img("phone");
+    if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
+      for (let y=BOX_Y0+10; y<=BOX_Y1-10; y+=20){
+        if (Math.abs(y-gapY)<38) continue;
+        drawImg(ph, side===0?BOX_X0+18:BOX_X1-18, y, 26,26, 0);
+      } ctx.restore(); }
+    // 扫描线
     for (let i=0;i<4;++i){
-      const sy=BOX_Y0+((g_animT*36+i*24)%(BOX_Y1-BOX_Y0));
-      ctx.strokeStyle="rgba(180,255,220,0.20)";
+      const sy=BOX_Y0+((g_animT*44+i*28)%(BOX_Y1-BOX_Y0));
+      ctx.strokeStyle="rgba(180,255,220,0.22)";
       ctx.lineWidth=1;
       ctx.beginPath(); ctx.moveTo(BOX_X0+2,sy); ctx.lineTo(BOX_X1-2,sy); ctx.stroke();
     }
-    const ph=img("phone");
-    if (ph){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      drawImg(ph,BOX_CX,y,30,30,Math.sin(g_animT*10)*20); ctx.restore(); }
     break; }
   case P_CRUSHER: {
     ctx.strokeStyle=`rgba(255,150,150,${(140+110*pulse)/255})`;
@@ -1764,17 +1814,38 @@ function renderWarn(pulse){
       drawImg(cb,BOX_CX+46,BOX_CY-20-Math.cos(g_animT*4)*4,24,24,g_animT*50);
       ctx.restore(); }
     break; }
-  case P_MEOW: {  // 4x4 炸弹格
-    for (let gy=0;gy<4;++gy) for (let gx=0;gx<4;++gx){
-      const x=BOX_X0+50+gx*(BOX_X1-BOX_X0-100)/3;
-      const y=BOX_Y0+22+gy*(BOX_Y1-BOX_Y0-44)/3;
-      const sel=((gx*4+gy+Math.floor(g_animT*2.2))%6===0);
-      ctx.fillStyle=`rgba(255,140,190,${sel?(150+100*pulse)/255:0.24})`;
-      ctx.beginPath(); ctx.arc(x,y,sel?5:2.5,0,6.29); ctx.fill();
+  case P_MEOW: {  // 4x4 炸弹格：网格 + 待引爆行列闪烁预告
+    ctx.strokeStyle="rgba(255,140,190,0.26)";
+    ctx.lineWidth=1;
+    ctx.setLineDash([4,6]);
+    for (let i=0;i<=4;++i){
+      const x=BOX_X0+i*(BOX_X1-BOX_X0)/4;
+      const y=BOX_Y0+6+i*(BOX_Y1-BOX_Y0-12)/4;
+      ctx.beginPath(); ctx.moveTo(x,BOX_Y0+4); ctx.lineTo(x,BOX_Y1-4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(BOX_X0+4,y); ctx.lineTo(BOX_X1-4,y); ctx.stroke();
     }
-    const bn=img("catbomb");
-    if (bn){ ctx.save(); ctx.imageSmoothingEnabled=false;
-      drawImg(bn,BOX_CX,BOX_CY,30,30,g_animT*80); ctx.restore(); }
+    ctx.setLineDash([]);
+    const cb0=img("catbomb");
+    for (const w of g_gridWarn){
+      const cw=(BOX_X1-BOX_X0-100)/3, ch=(BOX_Y1-BOX_Y0-44)/3;
+      const bx=BOX_X0+50+w.gx*cw, by=BOX_Y0+22+w.gy*ch;
+      const blink=Math.sin(g_animT*20)>0;
+      const a=blink?0.40:0.20;
+      // 整行 + 整列 高亮带
+      ctx.fillStyle=`rgba(255,60,110,${a})`;
+      ctx.fillRect(BOX_X0, by-ch/2, BOX_X1-BOX_X0, ch);
+      ctx.fillRect(bx-cw/2, BOX_Y0, cw, BOX_Y1-BOX_Y0);
+      // 扫描条纹
+      ctx.fillStyle=`rgba(255,220,235,${a*0.55})`;
+      for (let sy=by-ch/2; sy<by+ch/2; sy+=6) ctx.fillRect(BOX_X0, sy, BOX_X1-BOX_X0, 1.5);
+      for (let sx=bx-cw/2; sx<bx+cw/2; sx+=6) ctx.fillRect(sx, BOX_Y0, 1.5, BOX_Y1-BOX_Y0);
+      // 十字准线
+      ctx.strokeStyle=`rgba(255,255,255,${blink?0.95:0.55})`;
+      ctx.lineWidth=2;
+      ctx.strokeRect(bx-cw/2, by-ch/2, cw, ch);
+      if (cb0){ ctx.save(); ctx.imageSmoothingEnabled=false;
+        drawImg(cb0,bx,by,34,34,g_animT*180); ctx.restore(); }
+    }
     break; }
   case P_GHOST: {  // 雷达圈
     const rr=20+((g_animT*60)%70);
