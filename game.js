@@ -324,7 +324,8 @@ function netOnline(){                                    // 在线人数（含�
   for (const p of net.players.values()) if (now-p.ts<8000) n++;
   return n;
 }
-function netTick(dt, nowMs){
+function netTick(){
+  const nowMs=Date.now();                                // 统一用墙钟：与 net.loseAt / leftAt 同源
   if (!net.on) return;
   // presence 心跳
   if (nowMs-net.lastPre>2500){
@@ -2139,6 +2140,7 @@ function renderNetHUD(uiBot){
       rowY+=rowH;
     }
     outlineText(isTouch?"点玩家名即可邀请":"Tab 切换 · Enter 发邀请", px0+16, py0+ph-20, 12, "#7e86a4", -1, false);
+    rightText("本机 "+net.cid.slice(2,6).toUpperCase(), px0+pw-12, py0+ph-20, 11, "#6d7698");
   }
   // ---- 队友 HP（叠在自己 HP 条上方，避开底部按钮行）
   if (net.role && net.php!==undefined && uiBot!==undefined && g_state!==ST_TITLE){
@@ -2346,10 +2348,13 @@ function loop(now){
   lastT=now;
   if (dt>0.05) dt=0.05;
   Update(dt);
-  netTick(0, performance.now());
+  netTick();
   Render();
   requestAnimationFrame(loop);
 }
+// 心跳/同步独立于动画帧：窗口被遮挡或切到后台时浏览器会暂停 rAF，
+// 联机心跳不能跟着停（否则另一个窗口会看不到你这个玩家）
+setInterval(()=>{ try{ netTick(); }catch(e){} }, 250);
 
 // 资源加载完成 → 进入主界面
 loadFinishCb = ()=>{
