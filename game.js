@@ -99,6 +99,270 @@ let g_sliceT=0, g_chainN=0;                    // Tenna 切屏特效 / 闪电连
 let g_gridWarn=[];                             // Pink 炸弹格：待引爆的格子
 let g_sliceCv=null, g_sliceCtx=null;           // 切屏后处理用的临时画布
 
+// ---------------- 联机（MQTT 公共 broker，免注册） ----------------
+const NET_BASE = "sanjiao-boss-v1";
+const NET_WSS  = "wss://broker.emqx.io:8084/mqtt";
+const net = {
+  on:false, cli:null, cid:"", name:"",
+  role:"",                 // "" | "leader" | "member"
+  partner:"", partnerName:"", teamTopic:"",
+  players:new Map(),       // cid -> {n, s, ts}
+  selIdx:0, panel:false,
+  invite:null,             // 收到的邀请 {from, n, ts}
+  invSent:0,               // 已发出邀请 cid（等待回应）
+  lastPre:0, lastFlush:0, lastHb:0,
+  lastState:-1, bid:0, bidSent:0, px:undefined, py:undefined, php:undefined, pseen:0,
+  loseAt:0, seenSb:new Set(), lostSince:0, leftAt:0,
+};
+try {
+  net.cid = (localStorage.getItem("sj_cid") ||
+    (()=>{ const c="sj"+Math.random().toString(36).slice(2,10); localStorage.setItem("sj_cid",c); return c; })());
+  net.name = localStorage.getItem("sj_name") ||
+    ("玩家-"+Math.random().toString(36).slice(2,5).toUpperCase());
+  localStorage.setItem("sj_name", net.name);
+} catch(e){ net.cid="sj"+Math.random().toString(36).slice(2,10); net.name="玩家-?"; }
+
+function netPub(topic, obj, qos){
+  if (!net.on || !net.cli) return;
+  try { net.cli.publish(topic, JSON.stringify(obj), {qos:qos||0}); } catch(e){}
+}
+function netPubRetry(topic, obj, times){                 // 关键消息：QoS1 + 重发
+  netPub(topic, obj, 1);
+  for (let i=1;i<(times||3);++i)
+    setTimeout(()=>netPub(topic, obj, 1), i*350);
+}
+function netRole(){ return net.role; }
+function isMember(){ return net.role==="member"; }
+function isLeader(){ return net.role==="leader"; }
+
+function netConnect(){
+  if (typeof mqtt==="undefined") return;           // CDN 加载失败 → 离线单人
+  try {
+    net.cli = mqtt.connect(NET_WSS, {
+      clientId:"sjc_"+net.cid+"_"+Math.random().toString(36).slice(2,6),
+      clean:true, keepalive:30, reconnectPeriod:4000, connectTimeout:8000 });
+    net.cli.on("connect", ()=>{
+      net.on=true;
+      net.cli.subscribe([NET_BASE+"/p/#", NET_BASE+"/i/"+net.cid, NET_BASE+"/t/"+net.cid], ()=>{});
+    });
+    net.cli.on("close", ()=>{ net.on=false; });
+    net.cli.on("message", (topic, payload)=>{
+      let m; try { m=JSON.parse(payload.toString()); } catch(e){ return; }
+      netMsg(topic, m);
+    });
+  } catch(e){ net.on=false; }
+}
+function netMsg(topic, m){
+  if (topic.startsWith(NET_BASE+"/p/")){                 // presence
+    const cid=topic.slice(NET_BASE.length+3);
+    if (cid===net.cid) return;
+    net.players.set(cid, {n:m.n||"???", s:m.s||"lobby", ts:Date.now()});
+    if (net.partner && cid===net.partner){
+      net.partnerName=m.n;
+      // bye 消息可能丢：队友 presence 已回到大厅 → 兜底解散
+      if (m.s==="lobby"){
+        net.lostSince = net.lostSince || Date.now();
+      } else net.lostSince=0;
+    }
+    return;
+  }
+  if (topic===NET_BASE+"/i/"+net.cid){                   // 发给我的邀请/回应
+    if (m.t==="inv"){
+      if (!net.role && (!net.invite || Date.now()-net.invite.ts>6000))
+        net.invite={from:m.from, n:m.n, ts:Date.now()};
+      else if (net.role) netPub(NET_BASE+"/i/"+m.from, {t:"busy"});
+    } else if (m.t==="acc"){ netTeamForm(m.from, m.n); }
+    else if (m.t==="rej"){ if (net.invSent===m.from){ net.invSent=0; Say(m.n+" 拒绝了组队邀请"); } }
+    else if (m.t==="busy"){ if (net.invSent===m.from){ net.invSent=0; Say(m.n+" 正在组队中"); } }
+    else if (m.t==="ok"){                                // 队长确认 → 我是队员
+      if (net.leftAt && Date.now()-net.leftAt<6000) return;  // 刚退出，忽略迟到的确认
+      if (net.role==="member" && net.partner===m.leader) return;   // QoS 重发的重复包：别覆盖当前字幕/状态
+      net.role="member"; net.partner=m.leader; net.partnerName=m.n; net.lostSince=0; net.leftAt=0;
+      net.teamTopic=NET_BASE+"/t/"+m.leader;
+      net.invite=null; net.invSent=0; net.panel=false;
+      net.cli.subscribe(net.teamTopic, ()=>{});
+      Say("已与 "+m.n+" 组队！TA 是队长（红心），按 Enter 退出组队");
+    }
+    return;
+  }
+  if (net.teamTopic && topic===net.teamTopic){ netTeamMsg(m); }
+}
+// 队长收到同意 → 组队成立
+function netTeamForm(cid, name){
+  if (net.role || (net.invSent && net.invSent!==cid)) return;
+  net.role="leader"; net.partner=cid; net.partnerName=name; net.lostSince=0; net.leftAt=0;
+  net.teamTopic=NET_BASE+"/t/"+net.cid;
+  net.invSent=0; net.panel=false;
+  net.cli.subscribe(net.teamTopic, ()=>{});
+  netPubRetry(NET_BASE+"/i/"+cid, {t:"ok", leader:net.cid, n:net.name}, 3);
+  Say("已与 "+name+" 组队！你是队长（红心），选择 Boss 后 TA 会一起挑战");
+}
+// 组队频道消息
+function netTeamMsg(m){
+  if (m.from===net.cid) return;
+  if (m.t==="hb"){                                       // 队友心位置+HP
+    net.px=m.x; net.py=m.y; net.php=m.hp; net.pseen=Date.now();
+  } else if (m.t==="bye"){                               // 队友退出
+    const who=net.partnerName;
+    netDisband(false);
+    Say(who+" 退出了组队");
+  } else if (m.t==="start" && isMember()){               // 队长开战（重发只在未进战斗时应用）
+    if (g_state>=ST_INTRO && g_state<=ST_LOSE) return;
+    StartBattle(m.boss);
+  } else if (m.t==="atk" && isMember()){                 // 攻击阶段开始（重发只在未进攻击时应用）
+    if (g_state===ST_ATTACK) return;
+    g_pattern=m.pat; g_lastPat=m.pat; g_bullets=[]; g_state=ST_ATTACK; g_stateT=0;
+    g_spawnT=0; g_fired=true; g_knifeWarn=-1; g_sliceT=0; g_chainN=0; g_waveN=0;
+    g_gridWarn.length=0; g_heartX=BOX_CX; g_heartY=BOX_CY;
+    Say(m.txt||"");
+  } else if (m.t==="st" && isMember()){                  // 状态同步（胜负/台词）
+    if (m.s===g_state) return;                           // QoS1 重复消息
+    if (m.s===ST_WIN||m.s===ST_LOSE){
+      g_state=m.s; g_stateT=0; Say(m.txt||"");
+    } else if (m.s===ST_MENU){ g_state=ST_MENU; g_stateT=0; g_bullets=[]; Say(m.txt||""); }
+    else if (m.s===ST_INTRO){ if (g_state!==ST_INTRO) ResetGame(); }   // 幂等：迟到的重复包不再重置
+    else if (m.s===ST_TITLE){ if (g_state!==ST_TITLE) GoTitle(); }
+  } else if (m.t==="bf" && isMember()){                  // 子弹场全量同步（队长权威，丢包自愈）
+    const now=performance.now(), dtS=(now-(net.lastBf||now))/1000 || 0.1;
+    net.lastBf=now;
+    if (m.h){ net.px=m.h[0]; net.py=m.h[1]; net.php=m.h[2]; net.pseen=Date.now(); }
+    const got=new Set();
+    for (const e of m.b){
+      const sid=e[0]; got.add(sid);
+      let hit=null;
+      for (let i=0;i<g_bullets.length;++i) if (g_bullets[i]._sid===sid){ hit=g_bullets[i]; break; }
+      const fl=e[8]|0;
+      if (hit){
+        // 用两帧差值估计速度，帧间平滑移动（避免 8Hz 卡顿）
+        hit.vx=(e[2]-hit.x)/dtS*0.55 + hit.vx*0.45;
+        hit.vy=(e[3]-hit.y)/dtS*0.55 + hit.vy*0.45;
+        hit.x += (e[2]-hit.x)*0.5;
+        hit.y += (e[3]-hit.y)*0.5;
+        hit.rot=e[5]; hit.life=e[6]; hit._see=now;
+      } else {
+        g_bullets.push({_sid:sid, _bt:now, _see:now,
+          type:e[1], x:e[2], y:e[3], r:e[4], rot:e[5], rotv:0, life:e[6], dmg:e[7],
+          ring:!!(fl&1), bolt:!!(fl&2), pick:!!(fl&4), bounce:!!(fl&8), tt:0,
+          rx:e[9]||0, ry:e[10]||0,
+          vx:0, vy:0, ang:0, w:0, cx:0, cy:0, phase:0});
+      }
+    }
+    // 队长那边已经没有的子弹，本地移除
+    for (let i=g_bullets.length-1;i>=0;--i){
+      const b=g_bullets[i];
+      if (b._sid!==undefined && !got.has(b._sid) && now-(b._see||b._bt||0)>700) g_bullets.splice(i,1);
+    }
+  }
+}
+function netDisband(sendBye){
+  const topic=net.teamTopic;
+  if (sendBye && topic) netPub(topic, {t:"bye", from:net.cid}, 1);
+  // 立刻退订会丢掉刚发出的 bye，延迟再退
+  if (topic && net.cli) setTimeout(()=>{ try{ net.cli.unsubscribe(topic); }catch(e){} }, 700);
+  net.role=""; net.partner=""; net.partnerName=""; net.teamTopic="";
+  net.px=undefined; net.php=undefined; net.lostSince=0;
+}
+function netSendInvite(cid){
+  if (net.role){ Say("已经在队伍中了"); return; }
+  net.invSent=cid;
+  netPub(NET_BASE+"/i/"+cid, {t:"inv", from:net.cid, n:net.name});
+  Say("已向 "+(net.players.get(cid)?.n||"对方")+" 发出组队邀请…");
+}
+function netAcceptInvite(){
+  const iv=net.invite; if (!iv) return;
+  net.invite=null;
+  netPub(NET_BASE+"/i/"+iv.from, {t:"acc", from:net.cid, n:net.name});
+  Say("已同意 "+iv.n+" 的组队邀请…");
+}
+function netDeclineInvite(){
+  const iv=net.invite; if (!iv) return;
+  net.invite=null;
+  netPub(NET_BASE+"/i/"+iv.from, {t:"rej", from:net.cid, n:net.name});
+}
+function netLeave(){                                     // 队员/队长主动退出
+  if (!net.role) return;
+  const wasMember=isMember();
+  net.leftAt=Date.now();
+  netDisband(true);
+  Say(wasMember ? "已退出组队" : "队伍已解散");
+  if (wasMember && g_state>=ST_INTRO) GoTitle();
+}
+function netLobbyList(){                                 // 可邀请的在线玩家
+  const now=Date.now(), out=[];
+  for (const [cid,p] of net.players)
+    if (now-p.ts<8000 && p.s==="lobby" && cid!==net.invSent) out.push({cid, ...p});
+  return out;
+}
+function netOnline(){                                    // 在线人数（含自己）
+  const now=Date.now(); let n=1;
+  for (const p of net.players.values()) if (now-p.ts<8000) n++;
+  return n;
+}
+function netTick(dt, nowMs){
+  if (!net.on) return;
+  // presence 心跳
+  if (nowMs-net.lastPre>2500){
+    net.lastPre=nowMs;
+    const s = net.role ? (g_state===ST_ATTACK?"battle":"team") : "lobby";
+    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs});
+    for (const [cid,p] of net.players)                   // 清理过期玩家
+      if (nowMs-p.ts>9000){
+        net.players.delete(cid);
+        if (net.role && cid===net.partner){
+          const nm=net.partnerName;
+          netDisband(false); Say(nm+" 已离线，队伍解散");
+        }
+      }
+  }
+  // 组队频道同步
+  if (!net.role) return;
+  if (net.lostSince && nowMs-net.lostSince>4000){        // 队友已回大厅，队伍自动解散
+    const nm=net.partnerName;
+    netDisband(false); Say(nm+" 已退出组队");
+    return;
+  }
+  if (isMember() && net.loseAt && nowMs-net.loseAt>3000){
+    net.loseAt=0; netLeave(); return;
+  }
+  const topic=net.teamTopic;
+  if (isMember() && nowMs-net.lastHb>125){               // 队员：自己的心位置 8Hz
+    net.lastHb=nowMs;
+    netPub(topic, {t:"hb", from:net.cid, x:Math.round(g_heartX), y:Math.round(g_heartY), hp:Math.round(g_hp)});
+  }
+  if (nowMs-net.lastFlush>125){                          // 队长：状态+子弹场
+    net.lastFlush=nowMs;
+    if (isLeader()){
+      // 全量子弹场：8Hz 广播（丢包也不会不同步，下一个包就恢复）
+      if (nowMs-(net.lastBfPub||0)>125){
+        net.lastBfPub=nowMs;
+        const arr=[];
+        for (const b of g_bullets){
+          if (b._sid===undefined) b._sid=++net.bid;
+          const fl=(b.ring?1:0)|(b.bolt?2:0)|(b.pick?4:0)|(b.bounce?8:0);
+          arr.push([b._sid, b.type, Math.round(b.x), Math.round(b.y), b.r,
+                    Math.round(b.rot*100)/100, Math.round((b.life||0)*100)/100,
+                    b.dmg|0, fl, b.rx?1:0, b.ry?1:0]);
+          if (arr.length>=80) break;
+        }
+        netPub(topic, {t:"bf", from:net.cid,
+          h:[Math.round(g_heartX), Math.round(g_heartY), Math.round(g_hp)], b:arr});
+      }
+      // 攻击阶段低频重发 atk：成员掉线重连/丢包时自愈（成员已在战斗中会忽略）
+      if (g_state===ST_ATTACK && nowMs-(net.lastAtkPub||0)>1500){
+        net.lastAtkPub=nowMs;
+        netPub(topic, {t:"atk", from:net.cid, pat:g_pattern, txt:g_subtitle}, 1);
+      }
+      // ② 队友看不到的状态迁移（胜利/失败/台词）
+      if (g_state!==net.lastState){
+        if (g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_MENU)
+          netPubRetry(topic, {t:"st", from:net.cid, s:g_state, txt:g_subtitle}, 3);
+        net.lastState=g_state;
+      }
+    }
+  }
+}
+netConnect();
+
 // 特效
 let g_shakeT=0, g_shakeMag=0, g_hitStop=0, g_whiteFlash=0;
 let g_parts=[], g_rings=[];
@@ -210,13 +474,19 @@ function ResetGame(){
   Say(`${B.name} 拦住了你的去路！`);
   crtDirty = true;
   BgmStop(); BgmStart(B.bgm);
+  // 注意：这里不再广播 st:ST_INTRO。开战由 StartBattle 的 start 事件负责，
+  // 重复的 INTRO 会在队员端把刚同步的子弹场/状态清回开场（曾导致队员无弹幕、不掉血）。
 }
 function GoTitle(){
   g_state=ST_TITLE; g_stateT=0;
   g_bullets=[]; g_dmg=[]; g_sparks=[];
   Say(""); BgmStop();
+  if (isLeader()) netPubRetry(net.teamTopic, {t:"st", from:net.cid, s:ST_TITLE}, 3);
 }
-function StartBattle(boss){ g_boss=boss; ResetGame(); }
+function StartBattle(boss){
+  g_boss=boss; ResetGame();
+  if (isLeader()) netPubRetry(net.teamTopic, {t:"start", from:net.cid, boss}, 3);
+}
 function StartDialog(s, after){ Say(s); g_afterDialog=after; g_state=ST_DIALOG; g_stateT=0; }
 
 // ---------------- 弹幕 ----------------
@@ -269,6 +539,7 @@ function SpawnPattern(){
   for (let i=0;i<4;i++) if (B.pat[i]===g_pattern){ Say(B.patLine[i]); break; }
   if (g_boss===0) playVoice(randInt(2)===0 ? "Jevil_voiceclip_CHAOS.wav" : "Jevil_voiceclip_ANYTHING.wav");
   g_state=ST_ATTACK; g_stateT=0;
+  if (isLeader()) netPubRetry(net.teamTopic, {t:"atk", from:net.cid, pat:g_pattern, txt:g_subtitle}, 3);
 }
 function randInt(n){ _seed=(_seed*48271)%2147483647; return _seed%n; }
 function rndf(a,b){ return rnd(a,b); }
@@ -290,6 +561,7 @@ function HitPlayer(dmg){
     AddShake(0.5,8);
     BurstParts(g_heartX,g_heartY,24,200,255,70,100,0.8);
     Say("你被混沌吞没了……");
+    if (isMember()) net.loseAt=Date.now();     // 队员阵亡 → 稍后自动退队
   }
 }
 function HitJevil(dmg){
@@ -380,7 +652,18 @@ function Update(dt){
     if (g_stateT>2.0){
       const nx=g_afterDialog; g_afterDialog=ST_MENU;
       if (nx===ST_MENU){ g_state=ST_MENU; g_stateT=0; Say(""); }
-      else if (nx===ST_ATTACK) SpawnPattern();
+      else if (nx===ST_ATTACK){
+        if (isMember()){
+          g_afterDialog=ST_ATTACK;                 // 等队长的 atk 事件
+          if (g_stateT>6){                         // 看门狗：atk 全丢时兜底开打
+            g_pattern=g_lastPat; g_bullets=[];
+            g_state=ST_ATTACK; g_stateT=0;
+            g_spawnT=0; g_fired=true; g_knifeWarn=-1; g_sliceT=0; g_chainN=0; g_waveN=0;
+            g_gridWarn.length=0; g_heartX=BOX_CX; g_heartY=BOX_CY;
+          }
+        }
+        else SpawnPattern();
+      }
     }
     break;
   case ST_FIGHT:
@@ -435,8 +718,8 @@ function Update(dt){
       g_sparks.push({x:g_jevOffX+JEV_CX, y:g_jevOffY+JEV_CY, t:0, scale:1.4});
     }
 
-    // 预警→开火
-    const firing = g_stateT>=B.warn;
+    // 预警→开火（成员端不刷弹，只跑子弹更新；子弹由队长事件转发）
+    const firing = g_stateT>=B.warn && !isMember();
     if (firing && !g_fired){ g_fired=true; FirePattern(); }
 
     if (firing){
@@ -738,6 +1021,19 @@ function Update(dt){
     }
     const spawned=[];
     for (const b of g_bullets){
+      if (b._sid!==undefined){                 // 队长同步来的弹：只跟随+判伤，不跑本地生成/分裂逻辑
+        if (b.life>0 && !b.ring && b.vx===0 && b.vy===0){    // 激光：整条线判伤
+          b.life-=dt;
+          const hitLine = (b.rx>0.5) ? Math.abs(g_heartY-b.y)<10 : Math.abs(g_heartX-b.x)<10;
+          if (hitLine) HitPlayer(b.dmg>0?b.dmg:12);
+        } else {
+          b.x+=b.vx*dt; b.y+=b.vy*dt;
+          if (b.life!==0) b.life-=dt;
+          const dxs=b.x-g_heartX, dys=b.y-g_heartY;
+          if (dxs*dxs+dys*dys < (b.r+7)*(b.r+7)*0.80) HitPlayer(b.dmg>0?b.dmg:12);
+        }
+        continue;
+      }
       if (b.type===B_CROSS){
         b.rotv+=dt;
         const grow=980*dt;
@@ -876,11 +1172,31 @@ let hotspots = [];
 function hot(x,y,w,h,fn){ hotspots.push({x,y,w,h,fn}); }
 
 function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
+  // ---- 联机：Tab 选择玩家 / Enter 邀请·同意·退队
+  if (vk==="Tab"){
+    if ((g_state===ST_TITLE||g_state===ST_MENU) && !net.role){
+      const L=netLobbyList();
+      if (L.length){ net.selIdx=(net.selIdx+1)%(L.length+1); net.panel=true; playSfx("snd_menu_move"); }
+      else Say("暂无其他在线玩家");
+    }
+    return;
+  }
+  if (vk==="Enter"){
+    if (isMember()){ netLeave(); return; }                       // 队员随时退队
+    if (net.invite){ netAcceptInvite(); return; }                // 同意邀请
+    if ((g_state===ST_TITLE||g_state===ST_MENU) && !net.role){
+      const L=netLobbyList();
+      if (L.length && net.selIdx>0 && net.selIdx<=L.length){ netSendInvite(L[net.selIdx-1].cid); return; }
+    }
+    if (net.invSent){ Say("等待对方回应…"); return; }
+  }
+  if (vk==="x" && net.invite){ netDeclineInvite(); return; }     // 拒绝邀请
   // ---- 主界面
   if (g_state===ST_TITLE){
+    if (isMember()) return;                                      // 队员不能操作主界面
     if (vk==="ArrowLeft"){ g_bossSel=(g_bossSel+BOSS_N-1)%BOSS_N; playSfx("snd_menu_move"); }
     if (vk==="ArrowRight"){ g_bossSel=(g_bossSel+1)%BOSS_N; playSfx("snd_menu_move"); }
-    if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); StartBattle(g_bossSel); }
+    if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); net.selIdx=0; StartBattle(g_bossSel); }
     return;
   }
   // ---- 暂停
@@ -902,6 +1218,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
   }
   switch (g_state){
   case ST_MENU:
+    if (isMember()) break;                                       // 队员不能操作菜单
     if (vk==="ArrowLeft"){ g_btnSel=(g_btnSel+3)%4; playSfx("snd_menu_move"); }
     if (vk==="ArrowRight"){ g_btnSel=(g_btnSel+1)%4; playSfx("snd_menu_move"); }
     if (vk==="z"||vk==="Enter"){
@@ -934,16 +1251,17 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     }
     break;
   case ST_WIN: case ST_LOSE:
+    if (isMember()) break;                                       // 成员等队长同步
     if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); ResetGame(); }
     break;
   }
-  if (vk==="Escape" && g_state>=ST_INTRO && g_state!==ST_PAUSE){
+  if (vk==="Escape" && g_state>=ST_INTRO && g_state!==ST_PAUSE && !isMember()){
     g_pauseFrom=g_state; g_pauseSel=0; g_state=ST_PAUSE; playSfx("snd_menu_move");
   }
 }
 
 window.addEventListener("keydown", e=>{
-  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," "].includes(e.key)) e.preventDefault();
+  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Tab"].includes(e.key)) e.preventDefault();
   if (!e.repeat) pressKey(e.key.length===1 ? e.key.toLowerCase() : e.key);
   keys.add(e.key);
 });
@@ -1063,6 +1381,11 @@ function outlineText(s, x, y, size, color, cxAlign, bold=true){
   ctx.fillText(s, px, y);
 }
 
+function rightText(s, rx, y, size, color, bold=true){   // 以 rx 为右边界右对齐
+  ctx.font = `${bold?"bold ":""}${size}px "Microsoft YaHei","PingFang SC",sans-serif`;
+  const w = ctx.measureText(s).width;
+  outlineText(s, rx-w/2, y, size, color, rx-w/2, bold);
+}
 function GetCrt(){
   if (crtCanvas && !crtDirty) return crtCanvas;
   crtCanvas = document.createElement("canvas");
@@ -1131,6 +1454,17 @@ function RenderTitle(){
     outlineText("点选角色　再点一次开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
   else
     outlineText("← → 选择　Z 开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
+  // 联机信息
+  if (net.role){
+    outlineText(isLeader() ? "已组队：与 "+net.partnerName+"（TA 将与你一起挑战）"
+                           : "已组队：队长 "+net.partnerName+" · Enter 退出组队",
+                0, 382+VOY, 14, "#ffd257", WINW/2, false);
+  } else if (net.on){
+    outlineText(isTouch ? "点右下角在线人数 可查看玩家并邀请组队"
+                        : "Tab 选择玩家 · Enter 发出组队邀请",
+                0, 382+VOY, 13, "#8ea2d8", WINW/2, false);
+  }
+  renderNetHUD();
 }
 
 // ---- 暂停
@@ -1291,7 +1625,7 @@ function Render(){
     for (let i=0;i<4;++i) if (Boss().pat[i]===g_pattern){ nm=Boss().patLine[i]; break; }
     ctx.fillStyle="rgba(12,8,24,0.72)";
     ctx.fillRect(BOX_CX-190, BOX_Y0-19, 380, 22);
-    outlineText(nm, 0, BOX_Y0-16, 17, `rgba(255,${Math.floor(110+110*pulse)},${Math.floor(110+60*pulse)},1)`, WINW/2, false);
+    outlineText(nm, 0, BOX_Y0-16, 17, `rgba(255,${Math.floor(110+110*pulse)},${Math.floor(110+60*pulse)},1)`, BOX_CX, false);
   }
 
   // ---- 子弹
@@ -1393,19 +1727,29 @@ function Render(){
     }
   }
 
-  // ---- 红心
+  // ---- 红心（联机：队长红心 / 队员蓝心）
   if (inBoxView){
     const vis = g_inv<=0 || (g_animT%0.16)<0.09;
     if (g_state===ST_LOSE){
       const t=Math.min(1, g_stateT/0.8);
       ctx.save(); ctx.imageSmoothingEnabled=false;
-      drawImg(img("soul"), g_heartX-t*26, g_heartY-t*8, 24,24, -t*90);
-      drawImg(img("soul"), g_heartX+t*26, g_heartY-t*8, 24,24, t*90);
+      drawImg(mySoulImg(), g_heartX-t*26, g_heartY-t*8, 24,24, -t*90);
+      drawImg(mySoulImg(), g_heartX+t*26, g_heartY-t*8, 24,24, t*90);
       ctx.restore();
     } else if (vis){
       ctx.save(); ctx.imageSmoothingEnabled=false;
-      drawImg(img("soul"), g_heartX, g_heartY, 28,28);
+      drawImg(mySoulImg(), g_heartX, g_heartY, 28,28);
       ctx.restore();
+    }
+    // 队友的心
+    if (net.role && net.px!==undefined && g_state===ST_ATTACK){
+      const pv = Date.now()-(net.pseen||0) < 3000;    // 超过 3 秒没收到位置就隐藏
+      if (pv){
+        ctx.save(); ctx.imageSmoothingEnabled=false;
+        ctx.globalAlpha=0.92;
+        drawImg(partnerSoulImg(), net.px, net.py, 28,28);
+        ctx.restore();
+      }
     }
     // 虚拟摇杆（弹幕阶段按下屏幕时出现）
     if (joy.active){
@@ -1469,7 +1813,7 @@ function Render(){
     outlineText(g_subtitle, 0, 246+VOY, 20, "#ffe058", WINW/2);
   // 触屏操作提示（第一轮弹幕时出现）
   if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5)
-    outlineText("按住屏幕出摇杆 拖动方向躲避", 0, VOY+424, 14, "#c8d8ff", WINW/2, false);
+    outlineText("按住屏幕出摇杆 拖动方向躲避", 0, VOY+12, 13, "#c8d8ff", WINW/2, false);
 
   // ---- 底部 UI（贴屏幕底边，预留手机手势条/安全区）
   let SAFE_B = 0;
@@ -1507,6 +1851,8 @@ function Render(){
         hot(bx-8, by-8, bw+16, bh+16, ()=>{ g_btnSel=i; pressKey("z"); });
     }
   }
+
+  renderNetHUD(UI_BOT);   // 联机 HUD：右下角在线人数/队伍/邀请
 
   // ---- FIGHT 时机条（覆盖在战斗框上，跟随场景偏移）
   if (g_state===ST_FIGHT || (g_state===ST_DMG && g_stateT<0.4)){
@@ -1600,8 +1946,8 @@ function Render(){
   // ---- CRT 覆盖层
   ctx.drawImage(GetCrt(), 0, 0, WINW, WINH);
 
-  // ---- 暂停按钮（战斗中右上角）
-  if (g_state>=ST_INTRO && g_state!==ST_WIN && g_state!==ST_LOSE){
+  // ---- 暂停按钮（战斗中右上角；队员不可暂停）
+  if (g_state>=ST_INTRO && g_state!==ST_WIN && g_state!==ST_LOSE && !isMember()){
     btnPause();
   }
 
@@ -1692,9 +2038,97 @@ function drawBoltWarn(){
     drawImg(ph,g_warnX,BOX_Y0+16,30,30,Math.sin(g_animT*22)*14); ctx.restore(); }
 }
 
+// ---------------- 联机 HUD ----------------
+function soulBlueImg(){
+  if (net._soulBlue) return net._soulBlue;
+  const s=img("soul"); if (!s || !s.naturalWidth) return null;
+  try{
+    const c=document.createElement("canvas");
+    c.width=s.naturalWidth; c.height=s.naturalHeight;
+    const c2=c.getContext("2d");
+    c2.filter="hue-rotate(215deg) saturate(1.5)";
+    c2.drawImage(s,0,0);
+    c2.filter="none";
+    net._soulBlue=c; return c;
+  }catch(e){ return null; }
+}
+function mySoulImg(){ return isMember() ? (soulBlueImg()||img("soul")) : img("soul"); }
+function partnerSoulImg(){ return isMember() ? img("soul") : (soulBlueImg()||img("soul")); }
+
+function renderNetHUD(uiBot){
+  if (!net.on && !net.role) return;          // 离线且未组队时不显示
+  // ---- 邀请横幅（顶部）
+  if (net.invite){
+    const bw=340, bx=WINW/2-bw/2, by=8;
+    ctx.fillStyle="rgba(30,14,40,0.93)"; ctx.fillRect(bx,by,bw,46);
+    ctx.strokeStyle="#ff88b0"; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,46);
+    outlineText(net.invite.n+" 邀请你组队！", 0, by+6, 16, "#ffd6e4", WINW/2, false);
+    if (isTouch){
+      outlineText("[接受]", bx+74, by+25, 15, "#8cffb0", -1, false);
+      outlineText("[拒绝]", bx+bw-74, by+25, 15, "#ff9c9c", -1, false);
+      hot(bx+34, by+20, 80, 26, netAcceptInvite);
+      hot(bx+bw-114, by+20, 80, 26, netDeclineInvite);
+    } else outlineText("Enter 同意 · X 拒绝", 0, by+25, 13, "#c9d2e8", WINW/2, false);
+  } else if (net.invSent && (g_state===ST_TITLE||g_state===ST_MENU)){
+    outlineText("已发出组队邀请，等待回应…", 0, 10, 14, "#c9d2e8", WINW/2, false);
+  }
+  // ---- 右下角在线人数 / 队伍状态（右对齐，自动避让底部按钮行）
+  const oc=netOnline();
+  const lh=17;
+  const inBattle = uiBot!==undefined && g_state!==ST_TITLE && g_state!==ST_MENU;
+  const bot = inBattle ? uiBot-56 : WINH-14;          // 区块底边
+  const nLines = 1 + (net.role ? (isTouch?2:1) : 0);
+  const hy = bot - (15 + (nLines-1)*lh);
+  const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#8a8a9a";
+  rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 15, st);
+  if (net.role){
+    const tag = isLeader() ? "红心·队长" : "蓝心·队员";
+    rightText(tag+"  与 "+net.partnerName, WINW-10, hy+lh, 12, "#c9d2e8");
+    if (isTouch) rightText("点此退队", WINW-10, hy+lh*2, 11, "#8fa0c8");
+    if (isTouch) hot(WINW-196, hy+lh-4, 190, lh*(isTouch?2:1)+4, netLeave);   // 手机：点队伍状态退队
+  }
+  // 在线人数可点（开/关玩家面板）
+  if (g_state===ST_TITLE || g_state===ST_MENU)
+    hot(WINW-150, hy-8, 144, 26, ()=>{ net.panel=!net.panel; net.selIdx=0; });
+  // ---- 玩家面板
+  if (net.panel && (g_state===ST_TITLE||g_state===ST_MENU)){
+    const L=netLobbyList();
+    const pw=300, rowH=30, head=52, foot=26;
+    const ph=head + Math.max(1,Math.min(L.length,6))*rowH + foot;
+    const px0=WINW-pw-16, py0=Math.max(8, hy-ph-10);
+    ctx.fillStyle="rgba(12,9,24,0.95)"; ctx.fillRect(px0,py0,pw,ph);
+    ctx.strokeStyle="rgba(140,160,220,0.85)"; ctx.lineWidth=1.5; ctx.strokeRect(px0,py0,pw,ph);
+    outlineText("在线玩家（Tab 切换 · Enter 邀请）", px0+14, py0+12, 13, "#9fb4e8", -1, false);
+    let rowY=py0+head-12;
+    if (net.role) outlineText("已在队伍中（Enter 退出）", px0+16, rowY, 14, "#ffd257", -1, false);
+    else if (!L.length) outlineText("暂无可邀请的玩家", px0+16, rowY, 14, "#8a92b0", -1, false);
+    for (let i=0;i<L.length && i<6;++i){
+      const sel=(net.selIdx-1)===i;
+      if (sel){ ctx.fillStyle="rgba(80,110,220,0.38)"; ctx.fillRect(px0+8,rowY-5,pw-16,26); }
+      ctx.fillStyle = sel?"#8cffb0":"#9aa4c0";
+      ctx.beginPath(); ctx.arc(px0+20,rowY+4,4,0,6.29); ctx.fill();   // 在线小圆点
+      outlineText((sel?"▶ ":"　 ")+L[i].n, px0+32, rowY, 15, sel?"#ffffff":"#cfd6ea", -1, false);
+      if (sel) outlineText("Enter", px0+pw-58, rowY, 12, "#8cffb0", -1, false);
+      hot(px0+8, rowY-5, pw-16, 26, ()=>{ net.selIdx=i+1; netSendInvite(L[i].cid); });
+      rowY+=rowH;
+    }
+    outlineText(isTouch?"点玩家名即可邀请":"Tab 切换 · Enter 发邀请", px0+16, py0+ph-20, 12, "#7e86a4", -1, false);
+  }
+  // ---- 队友 HP（叠在自己 HP 条上方，避开底部按钮行）
+  if (net.role && net.php!==undefined && uiBot!==undefined && g_state!==ST_TITLE){
+    const pw=Math.max(0,Math.min(1,net.php/PLAYER_MAXHP));
+    const ty=uiBot-94;
+    outlineText("队友 "+net.partnerName, 46, ty-15, 11, "#9fb4e8", -1, false);
+    ctx.fillStyle="rgba(10,14,30,0.86)"; ctx.fillRect(46,ty,110,9);
+    ctx.fillStyle=isMember()?"#ff8f8f":"#5f9dff";
+    ctx.fillRect(46,ty,110*pw,9);
+    ctx.fillStyle="rgba(255,255,255,0.35)"; ctx.fillRect(46,ty,110*pw,3);
+    ctx.strokeStyle="rgba(200,215,255,0.9)"; ctx.lineWidth=1; ctx.strokeRect(46,ty,110,9);
+  }
+}
+
 // ---- 预警图形（每个招式）
-function renderWarn(pulse){
-  switch (g_pattern){
+function renderWarn(pulse){  switch (g_pattern){
   case P_CAROUSEL:
     for (let i=0;i<3;++i){
       const rr=(34+i*34)*(1+0.12*pulse);
@@ -1886,6 +2320,7 @@ function loop(now){
   lastT=now;
   if (dt>0.05) dt=0.05;
   Update(dt);
+  netTick(0, performance.now());
   Render();
   requestAnimationFrame(loop);
 }
