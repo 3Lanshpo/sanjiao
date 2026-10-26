@@ -115,8 +115,16 @@ const net = {
   loseAt:0, seenSb:new Set(), lostSince:0, leftAt:0,
 };
 try {
-  net.cid = (localStorage.getItem("sj_cid") ||
-    (()=>{ const c="sj"+Math.random().toString(36).slice(2,10); localStorage.setItem("sj_cid",c); return c; })());
+  // 身份按标签页隔离：同一浏览器开多个窗口/标签各算一个玩家（放 localStorage 会共用一个 cid，
+  // 两个窗口会互相忽略对方，导致在线人数永远是 1、也无法互邀）
+  let cid = null;
+  try { cid = sessionStorage.getItem("sj_cid"); } catch(e){}
+  if (!cid){
+    cid = "sj"+Math.random().toString(36).slice(2,10);
+    try { sessionStorage.setItem("sj_cid", cid); } catch(e){}
+  }
+  net.cid = cid;
+  net.inst = Math.random().toString(36).slice(2,8);   // 本次加载的实例号，用于识别「复制标签页」撞号
   net.name = localStorage.getItem("sj_name") ||
     ("玩家-"+Math.random().toString(36).slice(2,5).toUpperCase());
   localStorage.setItem("sj_name", net.name);
@@ -155,7 +163,10 @@ function netConnect(){
 function netMsg(topic, m){
   if (topic.startsWith(NET_BASE+"/p/")){                 // presence
     const cid=topic.slice(NET_BASE.length+3);
-    if (cid===net.cid) return;
+    if (cid===net.cid){
+      if (m.i && net.inst && m.i!==net.inst) netRerollId();   // 复制标签页 → 身份撞车，换一个
+      return;
+    }
     net.players.set(cid, {n:m.n||"???", s:m.s||"lobby", ts:Date.now()});
     if (net.partner && cid===net.partner){
       net.partnerName=m.n;
@@ -262,6 +273,20 @@ function netDisband(sendBye){
   net.role=""; net.partner=""; net.partnerName=""; net.teamTopic="";
   net.px=undefined; net.php=undefined; net.lostSince=0;
 }
+function netRerollId(){                                  // 复制标签页导致身份撞车：换成独立 cid 并重新订阅
+  const old=net.cid;
+  net.cid="sj"+Math.random().toString(36).slice(2,10);
+  net.inst=Math.random().toString(36).slice(2,8);
+  try { sessionStorage.setItem("sj_cid", net.cid); } catch(e){}
+  if (net.role) netDisband(true);
+  net.players.clear(); net.lastPre=0;
+  if (net.cli && net.on){
+    try {
+      net.cli.unsubscribe(NET_BASE+"/i/"+old);
+      net.cli.subscribe([NET_BASE+"/i/"+net.cid, NET_BASE+"/t/"+net.cid], ()=>{});
+    } catch(e){}
+  }
+}
 function netSendInvite(cid){
   if (net.role){ Say("已经在队伍中了"); return; }
   net.invSent=cid;
@@ -290,7 +315,8 @@ function netLeave(){                                     // 队员/队长主动�
 function netLobbyList(){                                 // 可邀请的在线玩家
   const now=Date.now(), out=[];
   for (const [cid,p] of net.players)
-    if (now-p.ts<8000 && p.s==="lobby" && cid!==net.invSent) out.push({cid, ...p});
+    if (now-p.ts<8000 && p.s==="lobby" && cid!==net.invSent)
+      out.push({cid, ...p, n: p.n===net.name ? p.n+"（另一窗口）" : p.n});   // 同名=同浏览器的另一个窗口
   return out;
 }
 function netOnline(){                                    // 在线人数（含自己）
@@ -304,7 +330,7 @@ function netTick(dt, nowMs){
   if (nowMs-net.lastPre>2500){
     net.lastPre=nowMs;
     const s = net.role ? (g_state===ST_ATTACK?"battle":"team") : "lobby";
-    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs});
+    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs, i:net.inst});
     for (const [cid,p] of net.players)                   // 清理过期玩家
       if (nowMs-p.ts>9000){
         net.players.delete(cid);
