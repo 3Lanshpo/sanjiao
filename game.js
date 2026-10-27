@@ -1948,6 +1948,16 @@ function Render(){
   // ---- 红心（联机：队长红心 / 队员蓝心）
   if (inBoxView){
     const vis = (g_inv<=0 || (g_animT%0.16)<0.09) && !g_dead;
+    // 队友的心先画（压在下面，回合开始时两人都居中，自己的心要盖在上面）
+    if (net.role && net.dpx!==undefined && net.dpx>-900 && g_state===ST_ATTACK){
+      const pv = Date.now()-(net.pseen||0) < 4000;    // 超过 4 秒没收到位置就隐藏
+      if (pv){
+        ctx.save(); ctx.imageSmoothingEnabled=false;
+        ctx.globalAlpha=0.92;
+        drawImg(partnerSoulImg(), net.dpx, net.dpy, 28,28);
+        ctx.restore();
+      }
+    }
     if (g_state===ST_LOSE){
       const t=Math.min(1, g_stateT/0.8);
       ctx.save(); ctx.imageSmoothingEnabled=false;
@@ -1958,17 +1968,6 @@ function Render(){
       ctx.save(); ctx.imageSmoothingEnabled=false;
       drawImg(mySoulImg(), g_heartX, g_heartY, 28,28);
       ctx.restore();
-    }
-    // 队友的心（用平滑后的显示坐标，避免 8Hz 心跳一卡一卡）
-    if (net.role && net.dpx!==undefined && net.dpx>-900 &&
-        (g_state===ST_ATTACK || g_state===ST_WAIT)){
-      const pv = Date.now()-(net.pseen||0) < 4000;    // 超过 4 秒没收到位置就隐藏
-      if (pv){
-        ctx.save(); ctx.imageSmoothingEnabled=false;
-        ctx.globalAlpha=0.92;
-        drawImg(partnerSoulImg(), net.dpx, net.dpy, 28,28);
-        ctx.restore();
-      }
     }
     // 虚拟摇杆（弹幕阶段按下屏幕时出现）
     if (joy.active){
@@ -2174,13 +2173,14 @@ function Render(){
     btnPause();
   }
 
-  // ---- 联机：等队友出刀
+  // ---- 联机：等队友出刀（贴战斗框底部，不压 Boss；这里的坐标是舞台系，要补 VOX/VOY）
   if (g_state===ST_WAIT && !g_dead){
-    const by=WINH*0.24;
-    ctx.fillStyle="rgba(8,6,16,0.62)"; ctx.fillRect(0,by-34,WINW,86);
     const dots=".".repeat(1+Math.floor(g_animT*2)%3);
-    outlineText("等待队友出刀"+dots, 0, by-24, 26, "#ffd257", WINW/2);
-    outlineText(isTouch?"点右上角暂停键可退出队伍":"按 ESC 打开暂停菜单（可退出）", 0, by+12, 14, "#9fb4e8", WINW/2, false);
+    const bx0=VOX+BOX_X0, bx1=VOX+BOX_X1, bh=54, by=VOY+BOX_Y1-bh;
+    ctx.fillStyle="rgba(8,6,16,0.55)"; ctx.fillRect(bx0,by,bx1-bx0,bh);
+    ctx.strokeStyle="rgba(255,210,87,0.35)"; ctx.lineWidth=1; ctx.strokeRect(bx0,by,bx1-bx0,bh);
+    outlineText("等待队友出刀"+dots, 0, by+6, 22, "#ffd257", VOX+BOX_CX);
+    outlineText(isTouch?"点右上角暂停键可退出队伍":"ESC 打开暂停菜单（可退出）", 0, by+33, 12, "#9fb4e8", VOX+BOX_CX, false);
   }
 
   // ---- 联机：阵亡选择（退出 / 观战）
