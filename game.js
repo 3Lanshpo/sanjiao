@@ -102,10 +102,14 @@ let g_dead=false, g_deadChoice=false, g_deadSel=0;   // 联机阵亡 / 是否已
 let g_actionKind="", g_actionDmg=0;            // 本回合行动（用于同步给队友）
 let g_pauseUI=false;                           // 联机暂停：只开面板，不冻结游戏
 let g_sliceCv=null, g_sliceCtx=null;           // 切屏后处理用的临时画布
+let g_hbMs=45;                                 // 弹幕阶段传心位置的间隔（公共 broker 高频会丢包，实测调）
 
 // ---------------- 联机（MQTT 公共 broker，免注册） ----------------
 const NET_BASE = "sanjiao-boss-v1";
-const NET_WSS  = "wss://broker.emqx.io:8084/mqtt";
+// 公共 broker：hivemq 实测最稳（RTT 220ms 上下、抖动极小）。两端必须连同一个，
+// 所以不做自动换 broker（换了会互相看不见），连不上就重连同一个。
+const NET_URLS = ["wss://broker.hivemq.com:8884/mqtt"];
+const NET_WSS  = NET_URLS[0];
 const net = {
   on:false, cli:null, cid:"", name:"",
   role:"",                 // "" | "leader" | "member"
@@ -117,6 +121,12 @@ const net = {
   lastPre:0, lastFlush:0, lastHb:0,
   lastState:-1, bid:0, bidSent:0, px:undefined, py:undefined, php:undefined, pseen:0,
   dpx:undefined, dpy:undefined, pvx:0, pvy:0, ppseen:0,   // 队友心的平滑显示坐标 + 速度估计
+  clkMin:undefined, hbLag:0,                              // 单程延迟基线（最小RTT法）/ 平滑后的当前延迟
+  rtt:0, pingT:0,                                         // ping/pong 往返（只用自己的时钟，不受两端时钟偏差影响）
+  retryAt:0,                                              // 上次重连时间（防抖）
+  pc:null, dc:null, dcOk:false, rtcT:0, pendCand:[], answering:false,   // WebRTC 直连（P2P，低延迟）
+  rtcId:0, lastOfferId:0,                                 // 信令去重（offer 会重发，重复的不能重建连接）
+  pTs:0, bTs:0,                                           // 已处理的最新 hb / bf 时间戳（双路去重）
   myAct:false, pAct:false, pActPending:false,              // 本回合：我 / 队友 是否已行动
   actSeen:"",                                              // act 去重键（QoS 重发只算一次）
   pDead:false,                                             // 队友是否已阵亡
@@ -151,22 +161,126 @@ function netRole(){ return net.role; }
 function isMember(){ return net.role==="member"; }
 function isLeader(){ return net.role==="leader"; }
 
+// ---------------- WebRTC 直连（P2P） ----------------
+// MQTT 公共 broker 要绕到境外，单程 200~400ms，打弹幕根本跟不上。
+// 组队后用 MQTT 做信令建立 DataChannel，之后位置/子弹走 P2P（同城 20~60ms，同机 <5ms），
+// MQTT 仍然双发兜底，直连失败就退回原来的中转方案。
+const RTC_ICE = { iceServers:[
+  {urls:["stun:stun.qq.com:3478","stun:stun.miwifi.com:3478","stun:stun.l.google.com:19302"]}
+]};
+function netRtcClose(){
+  try { net.dc && net.dc.close(); } catch(e){}
+  try { net.pc && net.pc.close(); } catch(e){}
+  net.dc=null; net.pc=null; net.dcOk=false; net.pendCand.length=0; net.rtcT=0; net.answering=false;
+  net.rtt=0;                                  // 直连断了 → 重新量延迟
+}
+function netRtcBindDc(dc){
+  net.dc=dc;
+  dc.onopen=()=>{ net.dcOk=true; net.rtt=0; Say("已建立直连（低延迟）"); };
+  dc.onclose=()=>{ if (net.dc===dc){ net.dcOk=false; net.dc=null; net.rtt=0; } };
+  dc.onmessage=ev=>{
+    let m; try { m=JSON.parse(ev.data); } catch(e){ return; }
+    m.__dc=1;                                     // 标记来源：ping 从哪来就从哪回，RTT 才不被中转延迟污染
+    netTeamMsg(m);
+  };
+}
+function netRtcSend(obj, qos, times){
+  const s=JSON.stringify(obj);
+  if (net.dc && net.dc.readyState==="open"){ try { net.dc.send(s); } catch(e){} }
+  if (!net.teamTopic) return;
+  if (times && times>1) netPubRetry(net.teamTopic, obj, times);
+  else netPub(net.teamTopic, obj, qos||0);
+}
+function netRtcStart(){                          // 队长发起
+  if (!isLeader() || !net.teamTopic) return;
+  if (net.dcOk) return;
+  if (net.pc && Date.now()-(net.rtcT||0) < 7000) return;   // 正在协商，别重启
+  try {
+    netRtcClose();
+    const pc=new RTCPeerConnection(RTC_ICE);
+    net.pc=pc; net.rtcT=Date.now();
+    net.rtcId=Date.now() + Math.floor(Math.random()*1000);   // 每次协商唯一（跨会话也不会撞）
+    const rid=net.rtcId;
+    netRtcBindDc(pc.createDataChannel("g",{ordered:true}));
+    pc.onicecandidate=e=>{ if (e.candidate) netRtcSend({t:"rtc",k:"c",from:net.cid,id:rid,c:e.candidate.toJSON()}); };
+    pc.onconnectionstatechange=()=>{
+      if (pc.connectionState==="failed"||pc.connectionState==="closed") netRtcDown();
+    };
+    pc.createOffer()
+      .then(o=>pc.setLocalDescription(o))
+      .then(()=>netRtcSend({t:"rtc",k:"o",from:net.cid,id:rid,sdp:pc.localDescription},1,3))
+      .catch(()=>{});
+  } catch(e){ netRtcDown(); }
+}
+function netRtcDown(){ netRtcClose(); }
+async function netRtcOnSignal(m){
+  try {
+    if (m.k==="hello"){                           // 队员订阅好了 → 队长现在可以发 offer
+      if (isLeader()) netRtcStart();
+    } else if (m.k==="o" && isMember()){           // 队员：收到 offer
+      if (m.id && m.id===net.lastOfferId){         // 同一个 offer 的重发：已经答过了，别再重建
+        if (net.pc && net.pc.localDescription)
+          netRtcSend({t:"rtc",k:"a",from:net.cid,id:m.id,sdp:net.pc.localDescription},1,0);
+        return;
+      }
+      net.lastOfferId=m.id||0;
+      netRtcClose();
+      const pc=new RTCPeerConnection(RTC_ICE);
+      net.pc=pc; net.rtcT=Date.now();
+      const rid=m.id||0;
+      pc.ondatachannel=e=>netRtcBindDc(e.channel);
+      pc.onicecandidate=e=>{ if (e.candidate) netRtcSend({t:"rtc",k:"c",from:net.cid,id:rid,c:e.candidate.toJSON()}); };
+      pc.onconnectionstatechange=()=>{
+        if (pc.connectionState==="failed"||pc.connectionState==="closed") netRtcDown();
+      };
+      await pc.setRemoteDescription(m.sdp);
+      for (const c of net.pendCand.splice(0)) { try { await pc.addIceCandidate(c); } catch(e){} }
+      const a=await pc.createAnswer();
+      await pc.setLocalDescription(a);
+      netRtcSend({t:"rtc",k:"a",from:net.cid,id:rid,sdp:pc.localDescription},1,3);
+    } else if (m.k==="a" && isLeader() && net.pc && !net.pc.currentRemoteDescription){
+      if (m.id && net.rtcId && m.id!==net.rtcId) return;   // 旧 offer 的应答，丢掉
+      if (net.answering) return;                           // 并发到达的重复 answer
+      net.answering=true;
+      try { await net.pc.setRemoteDescription(m.sdp); }
+      finally { net.answering=false; }
+      for (const c of net.pendCand.splice(0)) { try { await net.pc.addIceCandidate(c); } catch(e){} }
+    } else if (m.k==="c"){
+      if (m.id && net.rtcId && isLeader() && m.id!==net.rtcId) return;
+      if (!net.pc || !net.pc.remoteDescription){ net.pendCand.push(m.c); if (net.pendCand.length>40) net.pendCand.shift(); }
+      else { try { await net.pc.addIceCandidate(m.c); } catch(e){} }
+    }
+  } catch(e){ try{ console.warn("rtc-signal", e&&e.message||e); }catch(_){} }
+}
+
 function netConnect(){
   if (typeof mqtt==="undefined") return;           // CDN 加载失败 → 离线单人
+  const url = NET_URLS[0];
   try {
-    net.cli = mqtt.connect(NET_WSS, {
+    net.cli = mqtt.connect(url, {
       clientId:"sjc_"+net.cid+"_"+Math.random().toString(36).slice(2,6),
       clean:true, keepalive:30, reconnectPeriod:4000, connectTimeout:8000 });
     net.cli.on("connect", ()=>{
-      net.on=true;
+      net.on=true; net.retryAt=0;
       net.cli.subscribe([NET_BASE+"/p/#", NET_BASE+"/i/"+net.cid, NET_BASE+"/t/"+net.cid], ()=>{});
     });
     net.cli.on("close", ()=>{ net.on=false; });
+    net.cli.on("error", ()=>{ netRetryConnect(); });
     net.cli.on("message", (topic, payload)=>{
       let m; try { m=JSON.parse(payload.toString()); } catch(e){ return; }
       netMsg(topic, m);
     });
-  } catch(e){ net.on=false; }
+    setTimeout(()=>{ if (!net.on) netRetryConnect(); }, 9000);
+  } catch(e){ net.on=false; netRetryConnect(); }
+}
+function netRetryConnect(){                          // 连不上就重连同一个 broker（换 broker 会导致两端互相看不见）
+  if (net.on) return;
+  const now=Date.now();
+  if (net.retryAt && now-net.retryAt<8000) return;   // 别堆定时器
+  net.retryAt=now;
+  try { net.cli && net.cli.end(true); } catch(e){}
+  net.on=false;
+  setTimeout(()=>{ net.retryAt=0; if (!net.on) netConnect(); }, 2500);
 }
 function netMsg(topic, m){
   if (topic.startsWith(NET_BASE+"/p/")){                 // presence
@@ -178,10 +292,11 @@ function netMsg(topic, m){
     net.players.set(cid, {n:m.n||"???", s:m.s||"lobby", ts:Date.now()});
     if (net.partner && cid===net.partner){
       net.partnerName=m.n;
-      // bye 消息可能丢：队友 presence 已回到大厅 → 兜底解散
+      // bye 消息可能丢：对方的 presence 从 team/battle 变回 lobby 才算真退队。
+      // （组队刚成立时收到的第一条可能还是他几秒前发的旧 lobby 包，不能当退队）
       if (m.s==="lobby"){
-        net.lostSince = net.lostSince || Date.now();
-      } else net.lostSince=0;
+        if (net.pS && net.pS!=="lobby") net.lostSince = net.lostSince || Date.now();
+      } else { net.lostSince=0; net.pS=m.s; }
     }
     return;
   }
@@ -199,8 +314,11 @@ function netMsg(topic, m){
       net.role="member"; net.partner=m.leader; net.partnerName=m.n; net.lostSince=0; net.leftAt=0;
       net.teamTopic=NET_BASE+"/t/"+m.leader;
       net.invite=null; net.invSent=0; net.panel=false;
+      net.pTs=0; net.bTs=0;
       net.cli.subscribe(net.teamTopic, ()=>{});
       Say("已与 "+m.n+" 组队！TA 是队长（红心），按 Enter 退出组队");
+      setTimeout(()=>{ if (isMember() && net.partner===m.leader)
+        netPub(net.teamTopic, {t:"rtc", k:"hello", from:net.cid}); }, 250);
     }
     return;
   }
@@ -211,38 +329,72 @@ function netTeamForm(cid, name){
   if (net.role || (net.invSent && net.invSent!==cid)) return;
   net.role="leader"; net.partner=cid; net.partnerName=name; net.lostSince=0; net.leftAt=0;
   net.teamTopic=NET_BASE+"/t/"+net.cid;
-  net.invSent=0; net.panel=false;
+  net.invSent=0; net.panel=false; net.pTs=0; net.bTs=0;
   net.cli.subscribe(net.teamTopic, ()=>{});
   netPubRetry(NET_BASE+"/i/"+cid, {t:"ok", leader:net.cid, n:net.name}, 3);
   Say("已与 "+name+" 组队！你是队长（红心），选择 Boss 后 TA 会一起挑战");
+  setTimeout(()=>{ if (isLeader() && net.partner===cid) netRtcStart(); }, 900);   // 等对方订阅好再发 offer
 }
-// 队友心位置：记录速度用于帧间外推（8Hz 心跳也能画出 60fps 的顺滑移动）
-function netPartnerHeart(x, y){
+// 队友心位置：记录速度用于帧间外推。
+// ts = 队友发包时的墙钟。用「最小单程延迟」当基线，自动吃掉两端时钟偏差，
+// 剩下的就是这一包真正多花的时间 → 显示时可以整段前推掉，蓝心才不会慢半拍。
+function netPartnerHeart(x, y, ts){
+  if (ts && net.pTs && ts < net.pTs) return;     // 双路/旧快照：别把心往回拉
+  if (ts) net.pTs=ts;
   const now=Date.now();
+  if (ts){
+    const d=now-ts;
+    if (d>=0 && d<3000){
+      if (net.clkMin===undefined || d<net.clkMin) net.clkMin=d;
+      const raw=clamp(d-net.clkMin, 0, 400);
+      net.hbLag = net.hbLag ? net.hbLag*0.72+raw*0.28 : raw;
+    }
+  }
   if (net.px!==undefined && net.ppseen){
     const dtp=(now-net.ppseen)/1000;
-    if (dtp>0.02 && dtp<0.6){
-      net.pvx=clamp((x-net.px)/dtp, -520, 520);
-      net.pvy=clamp((y-net.py)/dtp, -520, 520);
+    if (dtp>0.012 && dtp<0.6){
+      const nvx=clamp((x-net.px)/dtp, -680, 680);
+      const nvy=clamp((y-net.py)/dtp, -680, 680);
+      net.pvx=net.pvx*0.35+nvx*0.65;     // 平滑速度：高频采样下别把抖动放大
+      net.pvy=net.pvy*0.35+nvy*0.65;
     }
-  } else { net.dpx=x; net.dpy=y; net.pvx=0; net.pvy=0; }
+  } else { net.dpx=x; net.dpy=y; net.pvx=0; net.pvy=0; net.hbLag=0; }
   net.px=x; net.py=y; net.ppseen=now; net.pseen=now;
 }
-// 每帧推进：目标 = 快照位置 + 速度×延迟，再向目标做阻尼逼近 → 既顺滑又跟手
+// 每帧推进：目标 = 快照位置 + 速度×(帧间隔 + 单程延迟)，再向目标阻尼逼近
+// → 既顺滑又跟手（网络越慢前推越多，视觉上把延迟补回来）
 function netSmoothTick(dt){
   if (net.px===undefined){ net.dpx=undefined; return; }
   if (net.dpx===undefined){ net.dpx=net.px; net.dpy=net.py; }
-  const age=Math.min(0.24, (Date.now()-(net.ppseen||0))/1000);
-  const tx=net.px+net.pvx*age, ty=net.py+net.pvy*age;
-  const k=Math.min(1, dt*24);
+  const age=Math.min(0.30, (Date.now()-(net.ppseen||0))/1000);
+  // 单程延迟估计：ping/pong 的 RTT/2（不受时钟偏差影响）与这包「发出→收到」的最小耗时
+  // 取较小值——两者都包含了不同的系统开销，偏大的那个(比如事件调度抖动)不该全部前推
+  const srtt=Math.min(0.30, Math.min((net.rtt||0)/2000, (net.clkMin||0)/1000));
+  const jit=Math.min(0.14, (net.hbLag||0)*0.6);   // 这一包额外多花的抖动时间
+  const lead=Math.min(0.46, age+srtt+jit);
+  let tx=net.px+net.pvx*lead, ty=net.py+net.pvy*lead;
+  tx=clamp(tx, BOX_X0+16, BOX_X1-16); ty=clamp(ty, BOX_Y0+16, BOX_Y1-16);
+  let k=Math.min(1, dt*55);                       // 时间常数 ~18ms：跟手优先
+  const gap=Math.hypot(tx-net.dpx, ty-net.dpy);
+  if (gap>80) k=Math.min(1, k+dt*12);             // 掉包/刚开回合落后太多 → 快速归位
   net.dpx+=(tx-net.dpx)*k; net.dpy+=(ty-net.dpy)*k;
 }
 // 组队频道消息
 function netTeamMsg(m){
   if (m.from===net.cid) return;
-  if (m.t==="hb"){                                       // 队友心位置+HP
-    netPartnerHeart(m.x, m.y); net.php=m.hp;
+  if (m.t==="rtc"){ netRtcOnSignal(m); return; }        // 直连信令
+  if (m.t==="hb"){                                       // 队友心位置+HP（双路到达的旧包由 netPartnerHeart 按 ts 丢弃）
+    netPartnerHeart(m.x, m.y, m.ts); net.php=m.hp;
     if (m.d!==undefined) net.pDead=!!m.d;
+  } else if (m.t==="ping"){                              // 量单程延迟：只用自己的时钟算 RTT，避免两端时钟偏差
+    const o={t:"pong", from:net.cid, ts:m.ts||0};
+    if (m.__dc && net.dc && net.dc.readyState==="open"){ try { net.dc.send(JSON.stringify(o)); } catch(e){} }
+    else netPub(net.teamTopic, o, 0);
+  } else if (m.t==="pong"){
+    if (m.ts && net.pongTs===m.ts) return;               // 直连+中转两份应答：只认先到的
+    net.pongTs=m.ts;
+    const r=Date.now()-(m.ts||0);
+    if (r>=0 && r<2000) net.rtt = net.rtt ? net.rtt*0.68+r*0.32 : r;
   } else if (m.t==="act"){                               // 队友已出刀/已行动
     if (m.turn!==undefined){
       if (m.turn===g_turn+1 && g_state===ST_ATTACK){ net.pActPending=true; return; }  // 我还在躲弹，下回合生效
@@ -285,9 +437,11 @@ function netTeamMsg(m){
     else if (m.s===ST_INTRO){ if (g_state!==ST_INTRO) ResetGame(); }   // 幂等：迟到的重复包不再重置
     else if (m.s===ST_TITLE){ if (g_state!==ST_TITLE) GoTitle(); }
   } else if (m.t==="bf" && isMember()){                  // 子弹场全量同步（队长权威，丢包自愈）
+    if (m.ts && net.bTs && m.ts < net.bTs) return;        // 双路到达的旧快照：丢掉，别让子弹往回跳
+    if (m.ts) net.bTs=m.ts;
     const now=performance.now(), dtS=(now-(net.lastBf||now))/1000 || 0.1;
     net.lastBf=now;
-    if (m.h){ netPartnerHeart(m.h[0], m.h[1]); net.php=m.h[2]; }
+    if (m.h){ netPartnerHeart(m.h[0], m.h[1], m.h[3]); net.php=m.h[2]; }
     if (m.bh!==undefined){ net.bh=m.bh; net.bshown=m.bs?1:0;
       g_jevHp=m.bh; if (m.bs) g_jevHpShown=true; }   // boss 血量以队长为准
     if (m.d!==undefined) net.pDead=!!m.d;            // 队友是否已阵亡
@@ -331,13 +485,24 @@ function netTeamMsg(m){
 }
 function netDisband(sendBye){
   const topic=net.teamTopic;
-  if (sendBye && topic) netPub(topic, {t:"bye", from:net.cid}, 1);
+  if (sendBye && topic){
+    const b={t:"bye", from:net.cid};
+    if (net.dc && net.dc.readyState==="open"){ try { net.dc.send(JSON.stringify(b)); } catch(e){} }
+    netPub(topic, b, 1);
+  }
   // 立刻退订会丢掉刚发出的 bye，延迟再退
   if (topic && net.cli) setTimeout(()=>{ try{ net.cli.unsubscribe(topic); }catch(e){} }, 700);
+  const wasWaiting = (g_state===ST_WAIT);        // 正卡在「等队友出刀」→ 队伍没了就别干等
+  netRtcClose();                                  // 关掉直连（bye 已经在上面发走了）
   net.role=""; net.partner=""; net.partnerName=""; net.teamTopic="";
-  net.px=undefined; net.php=undefined; net.lostSince=0;
+  net.px=undefined; net.php=undefined; net.lostSince=0; net.pseen=0; net.pS="";
   net.myAct=false; net.pAct=false; net.pActPending=false; net.pDead=false;
   net.dpx=undefined; net.dpy=undefined; net.pvx=0; net.pvy=0;
+  net.clkMin=undefined; net.hbLag=0; net.rtt=0; net.pingT=0;
+  net.pTs=0; net.bTs=0; net.pongTs=0;
+  if (wasWaiting && g_state===ST_WAIT){          // 队友退队/掉线 → 立刻继续单打，不卡在等待里
+    g_stateT=0; netBothActed();
+  }
 }
 function netRerollId(){                                  // 复制标签页导致身份撞车：换成独立 cid 并重新订阅
   const old=net.cid;
@@ -375,6 +540,7 @@ function netLeave(){                                     // 队员/队长主动�
   const wasMember=isMember();
   net.leftAt=Date.now();
   netDisband(true);
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst});
   Say(wasMember ? "已退出组队" : "队伍已解散");
   if (wasMember && g_state>=ST_INTRO) GoTitle();
 }
@@ -409,17 +575,32 @@ function netTick(){
   }
   // 组队频道同步
   if (!net.role) return;
-  if (net.lostSince && nowMs-net.lostSince>4000){        // 队友已回大厅，队伍自动解散
+  if (net.lostSince && nowMs-net.lostSince>2200){        // 队友 presence 已回大厅且迟迟没回来 → 解散
     const nm=net.partnerName;
     netDisband(false); Say(nm+" 已退出组队");
     return;
   }
   const topic=net.teamTopic;
-  if (isMember() && nowMs-net.lastHb>90){                // 队员：自己的心位置 11Hz（越密越顺）
+  // 每秒量一次往返延迟：蓝心的前推补偿靠这个值（只走一条路，别让中转的慢包污染 RTT）
+  if (nowMs-(net.pingT||0)>1100){
+    net.pingT=nowMs;
+    const o={t:"ping", from:net.cid, ts:nowMs};
+    let sent=false;
+    if (net.dcOk && net.dc && net.dc.readyState==="open"){ try { net.dc.send(JSON.stringify(o)); sent=true; } catch(e){} }
+    if (!sent) netPub(topic, o, 0);
+  }
+  // 双方都发自己的心位置：队员看红心、队长看蓝心都要跟手。
+  // 弹幕阶段 18Hz（直连时 30Hz），其余时间 7Hz。直连通了只走 P2P，MQTT 每 400ms 兜底。
+  const hbGap = (g_state===ST_ATTACK && !g_dead) ? (net.dcOk ? Math.min(g_hbMs,34) : g_hbMs) : 140;
+  if ((isMember() || isLeader()) && nowMs-net.lastHb>hbGap){
     net.lastHb=nowMs;
-    netPub(topic, {t:"hb", from:net.cid,
+    const o={t:"hb", from:net.cid, ts:nowMs,
       x:g_dead?-999:Math.round(g_heartX), y:g_dead?-999:Math.round(g_heartY),
-      hp:Math.round(g_hp), d:g_dead?1:0});
+      hp:Math.round(g_hp), d:g_dead?1:0};
+    if (net.dcOk && net.dc && net.dc.readyState==="open"){
+      try { net.dc.send(JSON.stringify(o)); } catch(e){}
+      if (nowMs-(net.lastHbMq||0)>400){ net.lastHbMq=nowMs; netPub(topic, o, 0); }
+    } else netPub(topic, o, 0);
   }
   if (nowMs-net.lastFlush>125){                          // 队长：状态+子弹场
     net.lastFlush=nowMs;
@@ -437,23 +618,27 @@ function netTick(){
                     b.dmg|0, fl, b.rx?1:0, b.ry?1:0]);
           if (arr.length>=80) break;
         }
-        netPub(topic, {t:"bf", from:net.cid,
-          h:[g_dead?-999:Math.round(g_heartX), g_dead?-999:Math.round(g_heartY), Math.round(g_hp)],
+        const o={t:"bf", from:net.cid, ts:nowMs,
+          h:[g_dead?-999:Math.round(g_heartX), g_dead?-999:Math.round(g_heartY), Math.round(g_hp), nowMs],
           bh:Math.round(g_jevHp), bs:g_jevHpShown?1:0, d:g_dead?1:0,
           v:[Math.round(g_sliceT*100)/100, g_waveN, Math.round(g_knifeWarn*100)/100,
              g_warnSide, Math.round(g_warnX), Math.round(g_warnY),
              g_gridWarn.map(w=>[w.gx, w.gy, Math.round(w.t*100)/100])],
-          b:arr});
+          b:arr};
+        if (net.dcOk && net.dc && net.dc.readyState==="open"){
+          try { net.dc.send(JSON.stringify(o)); } catch(e){}
+          if (nowMs-(net.lastBfMq||0)>500){ net.lastBfMq=nowMs; netPub(topic, o, 0); }
+        } else netPub(topic, o, 0);
       }
       // 攻击阶段低频重发 atk：成员掉线重连/丢包时自愈（成员已在战斗中会忽略）
       if (g_state===ST_ATTACK && nowMs-(net.lastAtkPub||0)>1500){
         net.lastAtkPub=nowMs;
-        netPub(topic, {t:"atk", from:net.cid, pat:g_pattern, txt:g_subtitle, turn:g_turn}, 1);
+        netRtcSend({t:"atk", from:net.cid, pat:g_pattern, txt:g_subtitle, turn:g_turn}, 1, 1);
       }
       // ② 队友看不到的状态迁移（胜利/失败/台词）
       if (g_state!==net.lastState){
         if (g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_MENU)
-          netPubRetry(topic, {t:"st", from:net.cid, s:g_state, txt:g_subtitle}, 3);
+          netRtcSend({t:"st", from:net.cid, s:g_state, txt:g_subtitle}, 1, 3);
         net.lastState=g_state;
       }
     }
@@ -750,8 +935,7 @@ function AfterAction(kind, dmg){               // 本回合自己的行动结束
   g_actionKind=kind||""; g_actionDmg=dmg|0;
   if (!net.role){ StartDialog(Boss().line[randInt(5)], ST_ATTACK); return; }
   net.myAct=true;
-  netPubRetry(net.teamTopic, {t:"act", from:net.cid, turn:g_turn,
-    kind:g_actionKind, dmg:g_actionDmg}, 2);
+  netRtcSend({t:"act", from:net.cid, turn:g_turn, kind:g_actionKind, dmg:g_actionDmg}, 1, 2);
   if (net.pAct){ netBothActed(); return; }     // 队友先出过刀 → 自己出刀后直接开打
   g_state=ST_WAIT; g_stateT=0;
   Say("");
@@ -785,7 +969,7 @@ function Update(dt){
   // 联机：已阵亡的人在菜单回合自动算「已行动」，不然队友会被卡在等刀状态
   if (g_dead && net.role && g_state===ST_MENU && !net.myAct){
     net.myAct=true;
-    netPubRetry(net.teamTopic, {t:"act", from:net.cid, turn:g_turn, kind:"dead", dmg:0}, 2);
+    netRtcSend({t:"act", from:net.cid, turn:g_turn, kind:"dead", dmg:0}, 1, 2);
     if (net.pAct) netBothActed();
   }
 
@@ -816,7 +1000,11 @@ function Update(dt){
     break;
   case ST_WAIT:                                    // 等队友出刀：只认暂停键
     g_stateT+=dt;
-    if (g_stateT>15){ net.pAct=true; netBothActed(); }   // 队友迟迟不出刀（掉线等）：兜底开打
+    if (!net.role){ netBothActed(); break; }         // 队伍已经没了（队友退了/解散）→ 立刻继续单打
+    if (net.pseen && Date.now()-net.pseen>3500){      // 队友心跳断了（掉线没发 bye）→ 别干等
+      net.pAct=true; netBothActed(); break;
+    }
+    if (g_stateT>15){ net.pAct=true; netBothActed(); }   // 兜底开打
     break;
   case ST_FIGHT:
     g_stateT+=dt;
@@ -2362,7 +2550,7 @@ function renderNetHUD(uiBot){
   const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#8a8a9a";
   rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 15, st);
   if (net.role){
-    const tag = isLeader() ? "红心·队长" : "蓝心·队员";
+    const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
     rightText(tag+"  与 "+net.partnerName, WINW-10, hy+lh, 12, "#c9d2e8");
     if (isTouch) rightText("点此退队", WINW-10, hy+lh*2, 11, "#8fa0c8");
     if (isTouch) hot(WINW-196, hy+lh-4, 190, lh*(isTouch?2:1)+4, netLeave);   // 手机：点队伍状态退队
