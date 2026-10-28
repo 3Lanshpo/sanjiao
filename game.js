@@ -130,6 +130,7 @@ const net = {
   myAct:false, pAct:false, pActPending:false,              // 本回合：我 / 队友 是否已行动
   actSeen:"",                                              // act 去重键（QoS 重发只算一次）
   pDead:false,                                             // 队友是否已阵亡
+  startNo:0,                                               // 开战序号（队长递增 / 队员记录已应用的那个）
   loseAt:0, seenSb:new Set(), lostSince:0, leftAt:0,
 };
 try {
@@ -316,6 +317,11 @@ function netMsg(topic, m){
       net.invite=null; net.invSent=0; net.panel=false;
       net.pTs=0; net.bTs=0;
       net.cli.subscribe(net.teamTopic, ()=>{});
+      // 原来正在单人挑战（或刚结算完）→ 先退出这场，等着队长开；否则 start 会被当成「已在战斗中」忽略
+      if (g_state!==ST_TITLE){
+        g_dead=false; g_deadChoice=false; g_deadSel=0; g_pauseUI=false; g_sub=SM_NONE;
+        GoTitle();
+      }
       Say("已与 "+m.n+" 组队！TA 是队长（红心），按 Enter 退出组队");
       setTimeout(()=>{ if (isMember() && net.partner===m.leader)
         netPub(net.teamTopic, {t:"rtc", k:"hello", from:net.cid}); }, 250);
@@ -365,6 +371,8 @@ function netPartnerHeart(x, y, ts){
 // 所以这里不追「点」，而是让「速度连续」：按估计速度前进，再用位置误差做比例纠偏
 function netSmoothTick(dt){
   if (net.px===undefined){ net.dpx=undefined; return; }
+  // 队友已阵亡（观战）→ 不画他的心。注意别走下面的钳制，否则 -999 会被慢慢拉到框左边缘
+  if (net.pDead || net.px<-900){ net.dpx=-999; net.dpy=-999; net.pvx=0; net.pvy=0; return; }
   if (net.dpx===undefined){ net.dpx=net.px; net.dpy=net.py; }
   const age=Math.min(0.30, (Date.now()-(net.ppseen||0))/1000);
   // 单程延迟估计：ping/pong 的 RTT/2（不受时钟偏差影响）与这包「发出→收到」的最小耗时
@@ -415,15 +423,20 @@ function netTeamMsg(m){
     net.actSeen=key;
     if (isLeader() && m.kind==="fight" && m.dmg>0) HitJevil(m.dmg|0);   // 队长权威扣血
     net.pAct=true;
-    if (net.myAct && g_state===ST_WAIT) netBothActed();
+    // 已经出过刀在等队友 → 开打；已经阵亡（观战）且停在菜单里 → 也要继续推进，
+    // 否则死掉的那一方会永远卡在菜单，队长不发 atk，活着的人只能干等
+    if (net.myAct && (g_state===ST_WAIT || (g_dead && g_state===ST_MENU))) netBothActed();
   } else if (m.t==="pick"){                              // 队友吃掉一颗爱心：本地同步移除，别让它被快照复活
     for (const b of g_bullets) if (b._sid===m.sid){ b.x=-9999; b._taken=true; }
   } else if (m.t==="bye"){                               // 队友退出
     const who=net.partnerName;
     netDisband(false);
     Say(who+" 退出了组队");
-  } else if (m.t==="start" && isMember()){               // 队长开战（重发只在未进战斗时应用）
-    if (g_state>=ST_INTRO && g_state<=ST_LOSE) return;
+  } else if (m.t==="start" && isMember()){               // 队长开战（按开战序号去重，重发/下一场都能正确处理）
+    if (m.b!==undefined && m.b===net.startNo) return;    // 同一场战斗的重发
+    net.startNo=(m.b!==undefined) ? m.b : net.startNo;
+    // 无论自己之前是不是在打（单人挑战 / 上一场的结算画面），一律按队长的这一场重开
+    g_pauseUI=false; g_dead=false; g_deadChoice=false;
     StartBattle(m.boss);
   } else if (m.t==="atk" && isMember()){                 // 攻击阶段开始（重发只在未进攻击时应用）
     if (g_state===ST_ATTACK) return;
@@ -516,6 +529,7 @@ function netDisband(sendBye){
   net.role=""; net.partner=""; net.partnerName=""; net.teamTopic="";
   net.px=undefined; net.php=undefined; net.lostSince=0; net.pseen=0; net.pS="";
   net.myAct=false; net.pAct=false; net.pActPending=false; net.pDead=false;
+  net.startNo=0;                                  // 开战序号：队长每开一场 +1，队员按序号去重（重发/重启都靠它）
   net.dpx=undefined; net.dpy=undefined; net.pvx=0; net.pvy=0;
   net.clkMin=undefined; net.hbLag=0; net.rtt=0; net.pingT=0;
   net.pTs=0; net.bTs=0; net.pongTs=0;
@@ -773,7 +787,9 @@ function ResetGame(){
   g_hitFlash=0; g_redFlash=0; g_lastPat=B.pat[0];
   g_whiteFlash=0.45;
   g_dead=false; g_deadChoice=false; g_deadSel=0;
-  net.myAct=false; net.pAct=false; net.pDead=false;
+  net.myAct=false; net.pAct=false; net.pDead=false; net.pActPending=false;
+  // 新一场：队友心的插值状态清掉（上一场可能停在 -999 的「阵亡坐标」上）
+  net.px=undefined; net.dpx=undefined; net.pvx=0; net.pvy=0;
   AddRing(JEV_CX,JEV_CY,120,255,230,150);
   AddRing(JEV_CX,JEV_CY,70,255,255,220);
   BurstParts(JEV_CX,JEV_CY,18,180,255,240,190,0.7);
@@ -792,7 +808,10 @@ function GoTitle(){
 }
 function StartBattle(boss){
   g_boss=boss; ResetGame();
-  if (isLeader()) netPubRetry(net.teamTopic, {t:"start", from:net.cid, boss}, 3);
+  if (isLeader()){
+    net.startNo=(net.startNo||0)+1;
+    netPubRetry(net.teamTopic, {t:"start", from:net.cid, boss, b:net.startNo}, 3);
+  }
 }
 function StartDialog(s, after){ Say(s); g_afterDialog=after; g_state=ST_DIALOG; g_stateT=0; }
 
@@ -958,7 +977,8 @@ function AfterAction(kind, dmg){               // 本回合自己的行动结束
   if (!net.role){ StartDialog(Boss().line[randInt(5)], ST_ATTACK); return; }
   net.myAct=true;
   netRtcSend({t:"act", from:net.cid, turn:g_turn, kind:g_actionKind, dmg:g_actionDmg}, 1, 2);
-  if (net.pAct){ netBothActed(); return; }     // 队友先出过刀 → 自己出刀后直接开打
+  // 队友先出过刀 → 直接开打；队友已阵亡（在观战）→ 不用等他，他那边跟着 atk 走
+  if (net.pAct || net.pDead){ netBothActed(); return; }
   g_state=ST_WAIT; g_stateT=0;
   Say("");
 }
@@ -1023,6 +1043,7 @@ function Update(dt){
   case ST_WAIT:                                    // 等队友出刀：只认暂停键
     g_stateT+=dt;
     if (!net.role){ netBothActed(); break; }         // 队伍已经没了（队友退了/解散）→ 立刻继续单打
+    if (net.pDead){ netBothActed(); break; }         // 队友已倒下（观战）→ 不用他出刀
     if (net.pseen && Date.now()-net.pseen>3500){      // 队友心跳断了（掉线没发 bye）→ 别干等
       net.pAct=true; netBothActed(); break;
     }
@@ -1704,7 +1725,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     break;
   case ST_WIN: case ST_LOSE:
     if (isMember()) break;                                       // 成员等队长同步
-    if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); ResetGame(); }
+    if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); StartBattle(g_boss); }   // 重开也要广播，队员才不会卡在结算画面
     break;
   }
   if (vk==="Escape" && g_state>=ST_INTRO && g_state!==ST_PAUSE) openPause();
@@ -2262,11 +2283,16 @@ function Render(){
     }
   }
 
-  // ---- 字幕
-  if (g_subtitle)
-    outlineText(g_subtitle, 0, 246+VOY, 20, "#ffe058", WINW/2);
+  // ---- 字幕（预警阶段框沿已经写着同一句招式名，别再叠一遍）
+  if (g_subtitle){
+    let dup=false;
+    if (g_state===ST_ATTACK && g_stateT<Boss().warn){
+      for (let i=0;i<4;++i) if (Boss().pat[i]===g_pattern && Boss().patLine[i]===g_subtitle){ dup=true; break; }
+    }
+    if (!dup) outlineText(g_subtitle, 0, 246+VOY, 20, "#ffe058", WINW/2);
+  }
   // 触屏操作提示（第一轮弹幕时出现）
-  if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5)
+  if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5 && !g_dead)
     outlineText("按住屏幕出摇杆 拖动方向躲避", 0, VOY+12, 13, "#c8d8ff", WINW/2, false);
 
   // ---- 底部 UI（贴屏幕底边，预留手机手势条/安全区）
