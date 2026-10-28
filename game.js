@@ -361,23 +361,33 @@ function netPartnerHeart(x, y, ts){
   } else { net.dpx=x; net.dpy=y; net.pvx=0; net.pvy=0; net.hbLag=0; }
   net.px=x; net.py=y; net.ppseen=now; net.pseen=now;
 }
-// 每帧推进：目标 = 快照位置 + 速度×(帧间隔 + 单程延迟)，再向目标阻尼逼近
-// → 既顺滑又跟手（网络越慢前推越多，视觉上把延迟补回来）
+// 每帧推进：位置点会随每个心跳小幅跳变（一包一跳 → 看着一顿一顿）
+// 所以这里不追「点」，而是让「速度连续」：按估计速度前进，再用位置误差做比例纠偏
 function netSmoothTick(dt){
   if (net.px===undefined){ net.dpx=undefined; return; }
   if (net.dpx===undefined){ net.dpx=net.px; net.dpy=net.py; }
   const age=Math.min(0.30, (Date.now()-(net.ppseen||0))/1000);
   // 单程延迟估计：ping/pong 的 RTT/2（不受时钟偏差影响）与这包「发出→收到」的最小耗时
-  // 取较小值——两者都包含了不同的系统开销，偏大的那个(比如事件调度抖动)不该全部前推
   const srtt=Math.min(0.30, Math.min((net.rtt||0)/2000, (net.clkMin||0)/1000));
-  const jit=Math.min(0.14, (net.hbLag||0)*0.6);   // 这一包额外多花的抖动时间
+  // hbLag 是毫秒（这包比最快那包多花的时间），换算成秒再前推；原来少除了 1000，
+  // 导致前推恒定多出 140ms —— 蓝心一直「超前一大段」还带一顿一顿
+  const jit=Math.min(0.14, (net.hbLag||0)*0.0006);
   const lead=Math.min(0.46, age+srtt+jit);
-  let tx=net.px+net.pvx*lead, ty=net.py+net.pvy*lead;
-  tx=clamp(tx, BOX_X0+16, BOX_X1-16); ty=clamp(ty, BOX_Y0+16, BOX_Y1-16);
-  let k=Math.min(1, dt*55);                       // 时间常数 ~18ms：跟手优先
-  const gap=Math.hypot(tx-net.dpx, ty-net.dpy);
-  if (gap>80) k=Math.min(1, k+dt*12);             // 掉包/刚开回合落后太多 → 快速归位
-  net.dpx+=(tx-net.dpx)*k; net.dpy+=(ty-net.dpy)*k;
+  let vx=net.pvx, vy=net.pvy;
+  if (age>0.20){ const bleed=Math.exp(-dt*9); vx*=bleed; vy*=bleed; }   // 心跳断了：速度自然衰减，别一直飘
+  const tx=clamp(net.px+vx*lead, BOX_X0+16, BOX_X1-16);
+  const ty=clamp(net.py+vy*lead, BOX_Y0+16, BOX_Y1-16);
+  const ex=tx-net.dpx, ey=ty-net.dpy;
+  if (Math.hypot(ex,ey)>70){                      // 刚开回合/掉包落后太多：先快速归位
+    const k=Math.min(1, dt*20);
+    net.dpx+=ex*k; net.dpy+=ey*k;
+  } else {
+    const kp=11;                                  // 位置纠偏增益（1/s）：~90ms 把误差吃掉
+    let ax=vx+ex*kp, ay=vy+ey*kp;
+    const sp=Math.hypot(ax,ay), cap=700;
+    if (sp>cap){ ax*=cap/sp; ay*=cap/sp; }
+    net.dpx+=ax*dt; net.dpy+=ay*dt;
+  }
 }
 // 组队频道消息
 function netTeamMsg(m){
@@ -406,6 +416,8 @@ function netTeamMsg(m){
     if (isLeader() && m.kind==="fight" && m.dmg>0) HitJevil(m.dmg|0);   // 队长权威扣血
     net.pAct=true;
     if (net.myAct && g_state===ST_WAIT) netBothActed();
+  } else if (m.t==="pick"){                              // 队友吃掉一颗爱心：本地同步移除，别让它被快照复活
+    for (const b of g_bullets) if (b._sid===m.sid){ b.x=-9999; b._taken=true; }
   } else if (m.t==="bye"){                               // 队友退出
     const who=net.partnerName;
     netDisband(false);
@@ -458,28 +470,35 @@ function netTeamMsg(m){
       let hit=null;
       for (let i=0;i<g_bullets.length;++i) if (g_bullets[i]._sid===sid){ hit=g_bullets[i]; break; }
       const fl=e[8]|0;
+      const dir=e[11], srotv=e[12]||0;
+      const dvx=(dir===0)?1:(dir===1)?-1:0, dvy=(dir===2)?1:(dir===3)?-1:0;
       if (hit){
+        if (hit._taken){ hit._see=now; continue; }       // 已经吃掉的爱心：别被快照拉回原位复活
         if (fl&16){ hit.st=true; hit.vx=0; hit.vy=0; }   // 静止光束：不要被抖动估成普通子弹
-        else {
+        else if (hit.type===B_CROSS){
+          hit.vx=dvx; hit.vy=dvy;                        // 十字光束的 vx/vy 是「方向」，不能当速度插值
+          hit.x=e[2]; hit.y=e[3];
+        } else {
           // 两帧差值估速 + 软对齐：8Hz 快照也能画出 60fps 的顺滑移动
           hit.vx=(e[2]-hit.x)/dtS*0.55 + hit.vx*0.45;
           hit.vy=(e[3]-hit.y)/dtS*0.55 + hit.vy*0.45;
           hit.x += (e[2]-hit.x)*0.70;
           hit.y += (e[3]-hit.y)*0.70;
         }
-        hit.rot=e[5]; hit.life=e[6]; hit._see=now;
+        hit.rot=e[5]; hit.life=e[6]; hit.dmg=e[7]; hit.rotv=srotv; hit._see=now;
       } else {
-        g_bullets.push({_sid:sid, _bt:now, _see:now,
-          type:e[1], x:e[2], y:e[3], r:e[4], rot:e[5], rotv:0, life:e[6], dmg:e[7],
+        g_bullets.push({_sid:sid, _net:1, _bt:now, _see:now,
+          type:e[1], x:e[2], y:e[3], r:e[4], rot:e[5], rotv:srotv, life:e[6], dmg:e[7],
           ring:!!(fl&1), bolt:!!(fl&2), pick:!!(fl&4), bounce:!!(fl&8), st:!!(fl&16), tt:0,
           rx:e[9]||0, ry:e[10]||0,
-          vx:0, vy:0, ang:0, w:0, cx:BOX_CX, cy:BOX_CY, phase:0});
+          vx:dvx, vy:dvy, ang:0, w:0, cx:BOX_CX, cy:BOX_CY, phase:0});
       }
     }
-    // 队长那边已经没有的子弹，本地移除
+    // 队长那边已经没有的子弹，本地移除（直连是可靠有序通道，不用等很久）
+    const missMs = net.dcOk ? 150 : 450;
     for (let i=g_bullets.length-1;i>=0;--i){
       const b=g_bullets[i];
-      if (b._sid!==undefined && !got.has(b._sid) && now-(b._see||b._bt||0)>700) g_bullets.splice(i,1);
+      if (b._net && !got.has(b._sid) && now-(b._see||b._bt||0)>missMs) g_bullets.splice(i,1);
     }
   }
 }
@@ -602,21 +621,24 @@ function netTick(){
       if (nowMs-(net.lastHbMq||0)>400){ net.lastHbMq=nowMs; netPub(topic, o, 0); }
     } else netPub(topic, o, 0);
   }
-  if (nowMs-net.lastFlush>125){                          // 队长：状态+子弹场
+  const bfGap = net.dcOk ? 40 : 125;                     // 直连 25Hz（队员眼里才是 60fps 的弹幕），中转 8Hz
+  if (nowMs-net.lastFlush > Math.min(bfGap,125)){
     net.lastFlush=nowMs;
     if (isLeader()){
-      // 全量子弹场：8Hz 广播（丢包也不会不同步，下一个包就恢复）
-      if (nowMs-(net.lastBfPub||0)>125){
+      // 全量子弹场：直连 25Hz / 中转 8Hz 广播（丢包也不会不同步，下一个包就恢复）
+      if (nowMs-(net.lastBfPub||0) > bfGap){
         net.lastBfPub=nowMs;
         const arr=[];
         for (const b of g_bullets){
           if (b._sid===undefined) b._sid=++net.bid;
           const fl=(b.ring?1:0)|(b.bolt?2:0)|(b.pick?4:0)|(b.bounce?8:0)|
                    ((b.life>0 && !b.ring && b.vx===0 && b.vy===0) ? 16 : 0);
+          const dir = (b.type===B_CROSS) ? (b.vx>0?0:b.vx<0?1:b.vy>0?2:3) : -1;
           arr.push([b._sid, b.type, Math.round(b.x), Math.round(b.y), b.r,
                     Math.round(b.rot*100)/100, Math.round((b.life||0)*100)/100,
-                    b.dmg|0, fl, b.rx?1:0, b.ry?1:0]);
-          if (arr.length>=80) break;
+                    b.dmg|0, fl, b.rx?1:0, b.ry?1:0, dir,
+                    Math.round((b.rotv||0)*100)/100]);
+          if (arr.length>=140) break;
         }
         const o={t:"bf", from:net.cid, ts:nowMs,
           h:[g_dead?-999:Math.round(g_heartX), g_dead?-999:Math.round(g_heartY), Math.round(g_hp), nowMs],
@@ -1272,7 +1294,7 @@ function Update(dt){
           const speed=(250+Math.min(g_waveN,6)*18)*ramp;
           for (let i=0;i<3;++i){
             if (i===gap) continue;
-            SpawnBulletAt(B_WHITECAT, BOX_X1+24, lanes[i], -speed, 0, 10);
+            SpawnBulletAt(B_WHITECAT, BOX_X1+24, lanes[i], -speed, 0, 13);
             const b=g_bullets[g_bullets.length-1];
             b.dmg=9; b.rotv=0;
           }
@@ -1364,17 +1386,39 @@ function Update(dt){
     }
     const spawned=[];
     for (const b of g_bullets){
-      if (b._sid!==undefined){                 // 队长同步来的弹：位置跟随手，life 用队长权威值
+      if (b._net){                              // 队长同步来的弹：位置跟随手，life/方向用队长权威值
+        if (b.type===B_CROSS){                  // 十字光束：整条线段判伤（绝不能当竖线激光）
+          const ex=b.x+b.vx*b.life, ey=b.y+b.vy*b.life;
+          if (!g_dead && distToSeg(g_heartX,g_heartY,b.x,b.y,ex,ey) < b.r+6) HitPlayer(b.dmg>0?b.dmg:12);
+          continue;
+        }
+        if (b.pick){                            // 拾取爱心：回血（原来掉进通用碰撞，被当成伤害）
+          const dxp=b.x-g_heartX, dyp=b.y-g_heartY;
+          if (!g_dead && dxp*dxp+dyp*dyp < (b.r+7)*(b.r+7)*0.80){
+            g_hp=Math.min(PLAYER_MAXHP, g_hp+12);
+            AddRing(b.x,b.y,50,255,120,170);
+            BurstParts(b.x,b.y,10,90,255,170,150,0.5);
+            playSfx("snd_menu_select");
+            b.x=-9999; b._taken=true;
+            netRtcSend({t:"pick", from:net.cid, sid:b._sid}, 1, 1);   // 告诉队长这颗已经被我吃掉
+          }
+          continue;
+        }
         if (b.st || (b.life>0 && !b.ring && b.vx===0 && b.vy===0)){   // 激光：整条线判伤
           if (!g_dead){
             const hitLine = (b.rx>0.5) ? Math.abs(g_heartY-b.y)<10 : Math.abs(g_heartX-b.x)<10;
             if (hitLine) HitPlayer(b.dmg>0?b.dmg:12);
           }
         } else {
+          const qx=b.x, qy=b.y;
           b.x+=b.vx*dt; b.y+=b.vy*dt;           // 快照之间的帧间补偿
           if (!g_dead){
+            // 线段判伤：8Hz 快照下白猫一帧能跳几十像素，圆点判定会直接穿过去
+            const rr=(b.r+7)*(b.r+7)*0.80;
             const dxs=b.x-g_heartX, dys=b.y-g_heartY;
-            if (dxs*dxs+dys*dys < (b.r+7)*(b.r+7)*0.80) HitPlayer(b.dmg>0?b.dmg:12);
+            if (dxs*dxs+dys*dys < rr ||
+                distToSeg(g_heartX,g_heartY,qx,qy,b.x,b.y) < Math.sqrt(rr))
+              HitPlayer(b.dmg>0?b.dmg:12);
           }
         }
         continue;                               // 不跑本地生成/分裂/寿命递减
@@ -2039,6 +2083,9 @@ function Render(){
     const sz=[30,28,30,52,34,30,30,26,30,28,30,32,34,27,30];
     const imKeys=["spade","diamond","club","knife","phone","coin","mail","heart","bomb",
                   "star","paw","ghost","catbomb","whitecat",null];
+    // 弹幕裁剪在框内：白猫从框外飞进来时不该在紫色背景上「穿墙」
+    ctx.save();
+    ctx.beginPath(); ctx.rect(BOX_X0+2, BOX_Y0+2, BOX_X1-BOX_X0-4, BOX_Y1-BOX_Y0-4); ctx.clip();
     for (const b of g_bullets){
       if (b.type===B_CROSS){
         const fade = b.rotv<0.45 ? 1 : Math.max(0, 1-(b.rotv-0.45)/0.25);
@@ -2092,6 +2139,7 @@ function Render(){
         ctx.restore();
       }
     }
+    ctx.restore();                                   // 结束弹幕裁剪
   }
 
   // ---- 粒子
