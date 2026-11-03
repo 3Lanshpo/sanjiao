@@ -38,6 +38,7 @@ function rnd(a, b) {          // 与 C++ 版同分布 [a,b]
   return a + (b - a) * ((_seed % 10001) / 10000);
 }
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const isTouch = ("ontouchstart" in window) || navigator.maxTouchPoints>0;   // 提前定义：fitCanvas 里要用
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
   if (l2 < 1e-4) return Math.hypot(px - ax, py - ay);
@@ -1076,21 +1077,13 @@ function Update(dt){
     g_stateT+=dt;
     const ramp = (1.0+Math.min(1.0,g_turn*0.10))*B.patW;
 
-    // 红心移动（键盘）—— 已阵亡（观战）时不再操控
+    // 红心移动（键盘方向键 / 屏幕方向键都写进同一个 keys）
     let sp = HEART_SPD*dt;
     if (!g_dead){
       if (keys.has("ArrowLeft"))  g_heartX-=sp;
       if (keys.has("ArrowRight")) g_heartX+=sp;
       if (keys.has("ArrowUp"))    g_heartY-=sp;
       if (keys.has("ArrowDown"))  g_heartY+=sp;
-      // 触屏：虚拟摇杆（方向即时生效，松手立刻停，无滑行）
-      if (joy.active){
-        const d=Math.hypot(joy.dx,joy.dy);
-        if (d>2){
-          const k=Math.min(1, d/joy.R);          // 摇杆行程 → 速度比例
-          g_heartX+=joy.dx/d*sp*k; g_heartY+=joy.dy/d*sp*k;
-        }
-      }
     }
     g_heartX=clamp(g_heartX, BOX_X0+10, BOX_X1-10);
     g_heartY=clamp(g_heartY, BOX_Y0+10, BOX_Y1-10);
@@ -1580,13 +1573,51 @@ function Update(dt){
 
 // ---------------- 输入 ----------------
 const keys = new Set();
-let touchStart = null;         // 判定点按 vs 拖动
-// 虚拟摇杆：按下处为底座，拖动方向即移动方向，松手立即停止
-const joy = { active:false, id:null, bx:0, by:0, dx:0, dy:0, R:34 };
+let touchStart = null;         // 点按判定（只给热区用）
 
 // 每帧渲染时重建的点击热区
 let hotspots = [];
 function hot(x,y,w,h,fn){ hotspots.push({x,y,w,h,fn}); }
+
+// ---- 触屏常驻按键：上 / 左 / 右 / 下 + A(确定) / B(返回) ----
+let SAFE_B = 0;                                  // 底部安全区（手机手势条）
+const PAD = { on:false, k:46, up:null, down:null, left:null, right:null, a:null, b:null };
+const VDIR = { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight" };
+const vptr = new Map();                          // pointerId → 按键 id（多指各管各的）
+
+function vpadLayout(){                           // 屏幕尺寸/安全区变了就重排
+  PAD.on = !!isTouch;
+  if (!PAD.on) return;
+  const k = Math.round(clamp(WINH*0.095, 40, 52));
+  PAD.k = k;
+  const bot = WINH - SAFE_B, x0 = 12, y0 = bot - 8 - k*3;
+  PAD.up    = {x:x0+k,   y:y0,     w:k, h:k};
+  PAD.left  = {x:x0,     y:y0+k,   w:k, h:k};
+  PAD.right = {x:x0+2*k, y:y0+k,   w:k, h:k};
+  PAD.down  = {x:x0+k,   y:y0+2*k, w:k, h:k};
+  const ra = Math.round(k*0.60), rb = Math.round(k*0.48);
+  const ax = WINW-14-ra, ay = bot-14-ra;         // A：右下角
+  PAD.a = {x:ax, y:ay, r:ra};
+  PAD.b = {x:ax-ra-rb-8, y:ay-rb-6, r:rb};       // B：A 的左上方
+}
+function vpadHit(x,y){                           // 命中的按键 id
+  if (!PAD.on) return null;
+  for (const id of ["up","down","left","right"]){
+    const q=PAD[id];
+    if (x>=q.x-5 && x<=q.x+q.w+5 && y>=q.y-5 && y<=q.y+q.h+5) return id;
+  }
+  for (const id of ["a","b"]){
+    const q=PAD[id];
+    if ((x-q.x)*(x-q.x)+(y-q.y)*(y-q.y) <= (q.r+9)*(q.r+9)) return id;
+  }
+  return null;
+}
+function pressBack(){                            // B：返回 / 取消
+  if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
+  if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
+  if (net.invite){ netDeclineInvite(); return; }
+  if (g_state===ST_SUB){ pressKey("x"); return; }
+}
 
 function openPause(){
   if (g_pauseUI) return;
@@ -1747,49 +1778,42 @@ function toLogical(clientX, clientY){
 cv.addEventListener("pointerdown", e=>{
   e.preventDefault();
   const p = toLogical(e.clientX, e.clientY);
-  if (g_state===ST_ATTACK){
-    // 按在热区上（暂停按钮等）不启动摇杆
-    let overHot=false;
-    for (const h of hotspots){ if (p.x>=h.x && p.x<=h.x+h.w && p.y>=h.y && p.y<=h.y+h.h){ overHot=true; break; } }
-    if (!overHot){
-      joy.active=true; joy.id=e.pointerId;
-      joy.bx=p.x-VOX; joy.by=p.y-VOY; joy.dx=0; joy.dy=0;
-    }
-    touchStart={...p, t:performance.now()};
+  const id = vpadHit(p.x, p.y);
+  if (id){                                       // 虚拟按键：按下即生效
+    vptr.set(e.pointerId, id);
+    if (id==="a"){ pressKey("z"); }
+    else if (id==="b"){ pressBack(); }
+    else { keys.add(VDIR[id]); pressKey(VDIR[id]); }
     return;
   }
   touchStart={...p, t:performance.now()};
 });
-cv.addEventListener("pointermove", e=>{
-  if (!joy.active || e.pointerId!==joy.id) return;
-  e.preventDefault();
-  const p = toLogical(e.clientX, e.clientY);
-  let dx=p.x-VOX-joy.bx, dy=p.y-VOY-joy.by;
-  const d=Math.hypot(dx,dy);
-  if (d>joy.R){ dx=dx/d*joy.R; dy=dy/d*joy.R; }   // 摇杆行程限幅
-  joy.dx=dx; joy.dy=dy;
-});
 function endPointer(e){
-  const wasJoy = joy.active && e.pointerId===joy.id;
-  if (wasJoy){ joy.active=false; joy.dx=0; joy.dy=0; joy.id=null; }
+  const id = vptr.get(e.pointerId);
+  if (id){                                       // 松开虚拟方向键 → 立刻停
+    vptr.delete(e.pointerId);
+    if (VDIR[id]) keys.delete(VDIR[id]);
+    return;
+  }
   if (!touchStart) return;
   const p = toLogical(e.clientX, e.clientY);
   const moved = Math.hypot(p.x-touchStart.x, p.y-touchStart.y);
   const isTap = moved < 14 && (performance.now()-touchStart.t) < 600;
   touchStart=null;
   if (!isTap) return;
-  // 热区（从后往前 = 最上层优先）
+  // 热区（从后往前 = 最上层优先）：只剩组队与暂停相关
   for (let i=hotspots.length-1;i>=0;--i){
     const h=hotspots[i];
     if (p.x>=h.x && p.x<=h.x+h.w && p.y>=h.y && p.y<=h.y+h.h){ h.fn(); return; }
   }
-  // 无热区兜底
-  if (g_state===ST_FIGHT) pressKey("z");
-  else if (g_state===ST_WIN || g_state===ST_LOSE) pressKey("z");
-  else if (g_state===ST_DIALOG || g_state===ST_INTRO) g_stateT=Math.max(g_stateT, 1.99);
 }
 cv.addEventListener("pointerup", e=>{ e.preventDefault(); endPointer(e); });
-cv.addEventListener("pointercancel", e=>{ joy.active=false; joy.dx=0; joy.dy=0; joy.id=null; touchStart=null; });
+cv.addEventListener("pointercancel", e=>{
+  const id = vptr.get(e.pointerId);
+  if (id){ vptr.delete(e.pointerId); if (VDIR[id]) keys.delete(VDIR[id]); }
+  touchStart=null;
+});
+window.addEventListener("blur", ()=>{ keys.clear(); vptr.clear(); });   // 切走时别让心一直往一个方向跑
 
 // ---------------- 渲染 ----------------
 const ctx = cv.getContext("2d");
@@ -1822,6 +1846,11 @@ function fitCanvas(){
   cv.style.height = wh + "px";
   const hint = document.getElementById("rotate");
   if (hint) hint.style.display = "none";     // 竖屏也能全屏显示，不再强制横屏
+  try {
+    const pp = getComputedStyle(document.documentElement).getPropertyValue("--sab").trim();
+    SAFE_B = parseFloat(pp) || 0;
+  } catch(e){ SAFE_B = 0; }
+  vpadLayout();                              // 虚拟按键跟着屏幕尺寸重排
 }
 window.addEventListener("resize", fitCanvas);
 window.addEventListener("orientationchange", ()=>{ setTimeout(fitCanvas,120); });
@@ -1915,20 +1944,13 @@ function RenderTitle(){
     outlineText(sub, 0, y+172, 15, "#bec8dc", x+w/2, false);
     let star=""; for (let s=0;s<=i;++s) star+="★";
     outlineText(star, 0, y+192, 15, "#ff7896", x+w/2, false);
-    // 触屏：点卡片选择，再点一次开战
-    hot(x, y, w, h, ()=>{
-      if (g_bossSel===i){ playSfx("snd_menu_select"); StartBattle(i); }
-      else { g_bossSel=i; playSfx("snd_menu_move"); }
-    });
   }
-  if (isTouch)
-    outlineText("点选角色　再点一次开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
-  else
-    outlineText("← → 选择　Z 开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
+  outlineText(isTouch?"方向键选择　A 开战":"← → 选择　Z 开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
   // 联机信息
   if (net.role){
     outlineText(isLeader() ? "已组队：与 "+net.partnerName+"（TA 将与你一起挑战）"
-                           : "已组队：队长 "+net.partnerName+" · Enter 退出组队",
+                           : (isTouch ? "已组队：队长 "+net.partnerName+" · 点队伍状态可退队"
+                                      : "已组队：队长 "+net.partnerName+" · Enter 退出组队"),
                 0, 382+VOY, 14, "#ffd257", WINW/2, false);
   } else if (net.on){
     outlineText(isTouch ? "点右下角在线人数 可查看玩家并邀请组队"
@@ -1992,12 +2014,13 @@ function Render(){
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
-  if (g_state===ST_TITLE){ RenderTitle(); return; }
+  if (g_state===ST_TITLE){ RenderTitle(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
     const bg0 = img("bg");
     if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
     ctx.drawImage(GetCrt(), 0, 0, WINW, WINH);
     RenderPause();
+    drawVPad();
     return;
   }
 
@@ -2226,24 +2249,6 @@ function Render(){
       drawImg(mySoulImg(), g_heartX, g_heartY, 28,28);
       ctx.restore();
     }
-    // 虚拟摇杆（弹幕阶段按下屏幕时出现）
-    if (joy.active){
-      const kx=joy.bx+joy.dx, ky=joy.by+joy.dy;
-      ctx.save();
-      ctx.globalAlpha=0.35;
-      ctx.fillStyle="#0a0a14";
-      ctx.beginPath(); ctx.arc(joy.bx,joy.by,joy.R+6,0,Math.PI*2); ctx.fill();
-      ctx.globalAlpha=0.55;
-      ctx.strokeStyle="#ffffff"; ctx.lineWidth=2;
-      ctx.beginPath(); ctx.arc(joy.bx,joy.by,joy.R+6,0,Math.PI*2); ctx.stroke();
-      ctx.globalAlpha=0.85;
-      ctx.fillStyle="#ff2244";
-      ctx.beginPath(); ctx.arc(kx,ky,14,0,Math.PI*2); ctx.fill();
-      ctx.globalAlpha=1;
-      ctx.strokeStyle="#ffd0d8"; ctx.lineWidth=2;
-      ctx.beginPath(); ctx.arc(kx,ky,14,0,Math.PI*2); ctx.stroke();
-      ctx.restore();
-    }
   }
   ctx.restore();   // 场景坐标系结束
   ctx.restore();   // 震屏结束
@@ -2291,19 +2296,11 @@ function Render(){
     }
     if (!dup) outlineText(g_subtitle, 0, 246+VOY, 20, "#ffe058", WINW/2);
   }
-  // 触屏操作提示（第一轮弹幕时出现）
-  if (isTouch && g_state===ST_ATTACK && g_turn===0 && g_stateT<3.5 && !g_dead)
-    outlineText("按住屏幕出摇杆 拖动方向躲避", 0, VOY+12, 13, "#c8d8ff", WINW/2, false);
-
   // ---- 底部 UI（贴屏幕底边，预留手机手势条/安全区）
-  let SAFE_B = 0;
-  try {
-    const pp = getComputedStyle(document.documentElement).getPropertyValue("--sab").trim();
-    SAFE_B = parseFloat(pp) || 0;
-  } catch(e){ SAFE_B = 0; }
   const UI_BOT = WINH - SAFE_B;          // 底部 UI 的基准线
   if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_INTRO){
-    const byy = UI_BOT-72;
+    // 手机上把 HP 挪到左上角：左下角要让给方向键
+    const byy = isTouch ? 10 : UI_BOT-72;
     outlineText("HP", 14, byy-4, 22, "#ffe678", -1);
     ctx.fillStyle="rgba(40,15,25,0.86)"; ctx.fillRect(46,byy,110,18);
     ctx.fillStyle="#ffc850"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),18);
@@ -2311,12 +2308,13 @@ function Render(){
     ctx.strokeStyle="rgba(240,240,245,1)"; ctx.lineWidth=1.6; ctx.strokeRect(46,byy,110,18);
     outlineText(`${Math.ceil(g_hp)}/${Math.floor(PLAYER_MAXHP)}`, 160, byy-2, 15, "#fff", -1, false);
 
-    // 按钮（四个常驻显示，仅主菜单可点；整行水平居中）
+    // 战斗菜单四项（常驻显示，用方向键选、A 确认）
     const btnKeys=["btn_fight","btn_act","btn_item","btn_mercy"];
-    const rowW = 3*102+98;
+    const rowW = isTouch ? Math.min(404, Math.max(248, WINW-2*172)) : 404;
+    const slot = rowW/4;
     const rowX = (WINW-rowW)/2;
     for (let i=0;i<4;++i){
-      let bx=rowX+i*102, by=UI_BOT-50, bw=98, bh=34;
+      let bx=rowX+i*slot+2, by=UI_BOT-50, bw=slot-4, bh=34;
       const sel = (g_state===ST_MENU && g_btnSel===i);
       if (sel){ bw+=8; bh+=6; bx-=4; by-=3;
         ctx.strokeStyle="rgba(255,255,255,0.63)"; ctx.lineWidth=2;
@@ -2327,8 +2325,6 @@ function Render(){
       ctx.globalAlpha = (g_state===ST_MENU||g_state===ST_SUB) ? 1 : 0.72;
       if (im){ ctx.imageSmoothingEnabled=false; drawImg(im, bx+bw/2, by+bh/2, bw, bh); }
       ctx.restore();
-      if (g_state===ST_MENU)
-        hot(bx-8, by-8, bw+16, bh+16, ()=>{ g_btnSel=i; pressKey("z"); });
     }
   }
 
@@ -2346,10 +2342,10 @@ function Render(){
       ctx.fillRect(g_barX-3, 60, 6, 190);
     }
     ctx.restore();
-    outlineText(isTouch?"点按屏幕出刀！":"按 Z 出刀！", 0, 256+VOY, 15, "#fff", WINW/2, false);
+    outlineText(isTouch?"按 A 出刀！":"按 Z 出刀！", 0, 256+VOY, 15, "#fff", WINW/2, false);
   }
 
-  // ---- 子菜单（画在战斗框上，跟随场景偏移；热区换算回舞台坐标）
+  // ---- 子菜单（画在战斗框上，跟随场景偏移）
   if (g_state===ST_SUB){
     ctx.save(); ctx.translate(VOX,VOY);
     let opts=[], n=0;
@@ -2361,7 +2357,6 @@ function Render(){
       outlineText(opts[i], BOX_X0+46, y-10, 22, i===g_subSel?"#fff":"#d8c8d2", -1);
       if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
         drawImg(img("soul"), BOX_X0+26, y, 26,26); ctx.restore(); }
-      hot(VOX+BOX_X0+20, VOY+y-22, BOX_X1-BOX_X0-40, 40, ()=>{ g_subSel=i; pressKey("z"); });
     }
     if (g_sub===SM_MERCY && g_spareReady){
       const im=img("sparkle");
@@ -2369,8 +2364,7 @@ function Render(){
         drawImg(im, BOX_X1-40, BOX_Y0+30, 36,36, g_animT*160); ctx.restore(); }
       outlineText("!!", BOX_X1-66, BOX_Y0+20, 22, "#ffe65a", -1);
     }
-    hot(VOX+BOX_X1-84, VOY+BOX_Y0+8, 72, 30, ()=>pressKey("x"));
-    outlineText("返回", BOX_X1-74, BOX_Y0+12, 15, "#9aa8c8", -1, false);
+    outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+12, 15, "#9aa8c8", -1, false);
     ctx.restore();
   }
 
@@ -2403,11 +2397,10 @@ function Render(){
     outlineText(flavor, 0, 240, 20, "#ebd8c8", WINW/2);
     if ((g_animT%1)<0.65){
       const tip = isMember()
-        ? (isTouch?"点按屏幕 退出队伍":"Enter 退出队伍")
-        : (isTouch?"点按屏幕 重新挑战":"Z 重新挑战　　ESC 返回主界面");
+        ? (isTouch?"点队伍状态 退出队伍":"Enter 退出队伍")
+        : (isTouch?"按 A 重新挑战":"Z 重新挑战　　ESC 返回主界面");
       outlineText(tip, 0, 330, 22, "#fff", WINW/2);
     }
-    if (!isMember()) hot(0,0,WINW,WINH,()=>pressKey("z"));
   }
 
   // ---- 受伤红闪
@@ -2458,9 +2451,8 @@ function Render(){
       ctx.strokeStyle = g_deadSel===i?"#ffffff":"#7a86aa"; ctx.lineWidth=2;
       ctx.strokeRect(bx,by,bw,52);
       outlineText(labels[i], 0, by+16, 21, "#fff", bx+bw/2);
-      hot(bx-6,by-6,bw+12,64,()=>{ playSfx("snd_menu_select"); if (i===0) deadQuit(); else deadSpectate(); });
     }
-    if (!isTouch) outlineText("← → 选择　Z 确认", 0, WINH*0.42+70, 14, "#c9d2e8", WINW/2, false);
+    outlineText(isTouch?"← → 选择　A 确认":"← → 选择　Z 确认", 0, WINH*0.42+70, 14, "#c9d2e8", WINW/2, false);
   } else if (net.role && g_dead && g_deadChoice && g_state!==ST_LOSE){
     rightText("观战中 · 暂停键退出", WINW-10, 46, 12, "#8fa0c8");
   }
@@ -2471,6 +2463,51 @@ function Render(){
   // ---- 操作提示
   if (g_state===ST_MENU && !isTouch)
     outlineText("方向键选择  Z确认  X取消", 12, 10, 15, "#b4d2ff", -1, false);
+
+  // ---- 触屏常驻按键（画在最上层，盖住面板也能操作）
+  drawVPad();
+}
+
+// 触屏虚拟按键：上左下右 + A(确定) / B(返回)
+function drawVPad(){
+  if (!PAD.on) return;
+  const pressed = new Set(vptr.values());
+  for (const id of ["up","down","left","right"]){
+    const q=PAD[id], p=pressed.has(id);
+    ctx.save();
+    roundRect(q.x,q.y,q.w,q.h,9);
+    ctx.fillStyle = p ? "rgba(255,226,110,0.30)" : "rgba(10,8,20,0.26)";
+    ctx.fill();
+    ctx.strokeStyle = p ? "rgba(255,236,140,0.95)" : "rgba(212,222,255,0.42)";
+    ctx.lineWidth = p?2.4:1.5; ctx.stroke();
+    const cx=q.x+q.w/2, cy=q.y+q.h/2, s=q.w*0.20;
+    ctx.beginPath();
+    if (id==="up")   { ctx.moveTo(cx,cy-s*1.1); ctx.lineTo(cx+s,cy+s*0.75); ctx.lineTo(cx-s,cy+s*0.75); }
+    if (id==="down") { ctx.moveTo(cx,cy+s*1.1); ctx.lineTo(cx+s,cy-s*0.75); ctx.lineTo(cx-s,cy-s*0.75); }
+    if (id==="left") { ctx.moveTo(cx-s*1.1,cy); ctx.lineTo(cx+s*0.75,cy+s); ctx.lineTo(cx+s*0.75,cy-s); }
+    if (id==="right"){ ctx.moveTo(cx+s*1.1,cy); ctx.lineTo(cx-s*0.75,cy+s); ctx.lineTo(cx-s*0.75,cy-s); }
+    ctx.closePath();
+    ctx.fillStyle = p ? "#fffbe0" : "rgba(236,242,255,0.88)";
+    ctx.fill();
+    ctx.restore();
+  }
+  for (const [id,ch,cap,col] of [["a","A","确定","rgba(125,255,176,0.85)"],["b","B","返回","rgba(255,156,174,0.85)"]]){
+    const q=PAD[id], p=pressed.has(id);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(q.x,q.y,q.r,0,Math.PI*2);
+    ctx.fillStyle = p ? "rgba(255,226,110,0.34)" : "rgba(10,8,20,0.30)";
+    ctx.fill();
+    ctx.strokeStyle = p ? "rgba(255,238,150,1)" : col;
+    ctx.lineWidth = p?3:2; ctx.stroke();
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.font = `bold ${Math.round(q.r*0.80)}px "Microsoft YaHei","PingFang SC",sans-serif`;
+    ctx.fillStyle="#fff";
+    ctx.fillText(ch, q.x, q.y-q.r*0.22);
+    ctx.font = `${Math.round(q.r*0.42)}px "Microsoft YaHei","PingFang SC",sans-serif`;
+    ctx.fillStyle= p?"#fff6c8":"rgba(232,238,255,0.9)";
+    ctx.fillText(cap, q.x, q.y+q.r*0.52);
+    ctx.restore();
+  }
 }
 
 function RenderPauseUI(){
@@ -2618,7 +2655,8 @@ function renderNetHUD(uiBot){
   const oc=netOnline();
   const lh=17;
   const inBattle = uiBot!==undefined && g_state!==ST_TITLE && g_state!==ST_MENU;
-  const bot = inBattle ? uiBot-56 : WINH-14;          // 区块底边
+  // 手机上右下角被 A/B 占了 → 整块上移
+  const bot = (inBattle ? uiBot-56 : WINH-14) - (isTouch?96:0);
   const nLines = 1 + (net.role ? (isTouch?2:1) : 0);
   const hy = bot - (15 + (nLines-1)*lh);
   const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#8a8a9a";
@@ -2657,10 +2695,10 @@ function renderNetHUD(uiBot){
     outlineText(isTouch?"点玩家名即可邀请":"Tab 切换 · Enter 发邀请", px0+16, py0+ph-20, 12, "#7e86a4", -1, false);
     rightText("本机 "+net.cid.slice(2,6).toUpperCase(), px0+pw-12, py0+ph-20, 11, "#6d7698");
   }
-  // ---- 队友 HP（叠在自己 HP 条上方，避开底部按钮行）
+  // ---- 队友 HP（手机：跟着自己的 HP 一起放左上角；桌面：叠在自己 HP 条上方）
   if (net.role && net.php!==undefined && uiBot!==undefined && g_state!==ST_TITLE){
     const pw=Math.max(0,Math.min(1,net.php/PLAYER_MAXHP));
-    const ty=uiBot-94;
+    const ty = isTouch ? 46 : uiBot-94;
     outlineText("队友 "+net.partnerName, 46, ty-15, 11, "#9fb4e8", -1, false);
     ctx.fillStyle="rgba(10,14,30,0.86)"; ctx.fillRect(46,ty,110,9);
     ctx.fillStyle=isMember()?"#ff8f8f":"#5f9dff";
@@ -2856,7 +2894,6 @@ function renderWarn(pulse){  switch (g_pattern){
 }
 
 // ---------------- 主循环 ----------------
-const isTouch = ("ontouchstart" in window) || navigator.maxTouchPoints>0;
 let lastT = performance.now();
 function loop(now){
   let dt=(now-lastT)/1000;
