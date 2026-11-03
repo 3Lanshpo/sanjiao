@@ -1581,6 +1581,7 @@ function hot(x,y,w,h,fn){ hotspots.push({x,y,w,h,fn}); }
 
 // ---- 触屏常驻按键：上 / 左 / 右 / 下 + A(确定) / B(返回) ----
 let SAFE_B = 0;                                  // 底部安全区（手机手势条）
+let VSC = 1;                                     // 1 CSS 像素 = 多少舞台逻辑像素（fitCanvas 里算）
 const PAD = { on:false, k:46, up:null, down:null, left:null, right:null, a:null, b:null };
 const VDIR = { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight" };
 const vptr = new Map();                          // pointerId → 按键 id（多指各管各的）
@@ -1588,27 +1589,40 @@ const vptr = new Map();                          // pointerId → 按键 id（�
 function vpadLayout(){                           // 屏幕尺寸/安全区变了就重排
   PAD.on = !!isTouch;
   if (!PAD.on) return;
-  const k = Math.round(clamp(WINH*0.095, 40, 52));
+  // 尺寸按 CSS 像素定：舞台逻辑分辨率会随屏幕比例变大（横屏 844×390 时逻辑宽 1039），
+  // 若按逻辑像素算，按键实测只有 37 CSS px，拇指根本压不准。
+  const ww = document.documentElement.clientWidth  || WINW;
+  const wh = document.documentElement.clientHeight || WINH;
+  const kCss = clamp(Math.min(ww, wh) * 0.150, 54, 82);   // 单键边长（CSS px）
+  const k = kCss * VSC;
+  const g = 3 * VSC;                               // 键间缝隙：贴着摆会连按误触
+  const m = 8 * VSC;                               // 距屏幕边缘留白
   PAD.k = k;
-  const bot = WINH - SAFE_B, x0 = 12, y0 = bot - 8 - k*3;
-  PAD.up    = {x:x0+k,   y:y0,     w:k, h:k};
-  PAD.left  = {x:x0,     y:y0+k,   w:k, h:k};
-  PAD.right = {x:x0+2*k, y:y0+k,   w:k, h:k};
-  PAD.down  = {x:x0+k,   y:y0+2*k, w:k, h:k};
-  const ra = Math.round(k*0.60), rb = Math.round(k*0.48);
-  const ax = WINW-14-ra, ay = bot-14-ra;         // A：右下角
+  // 竖屏底部有 FIGHT/ACT/ITEM/MERCY 指令行：整组按键上抬让开，免得压住指令按钮
+  const lift = (wh > ww) ? 56*VSC : 0;
+  const bot = WINH - SAFE_B - lift;
+  const md = 5*VSC;                                // 方向键贴边一些，让开标题卡片/tips
+  const x0 = md, y0 = bot - m - (3*k + 2*g);
+  PAD.up    = {x:x0+k+g,     y:y0,         w:k, h:k};
+  PAD.left  = {x:x0,         y:y0+k+g,     w:k, h:k};
+  PAD.right = {x:x0+2*(k+g), y:y0+k+g,     w:k, h:k};
+  PAD.down  = {x:x0+k+g,     y:y0+2*(k+g), w:k, h:k};
+  const ra = k*0.66, rb = k*0.56;                  // A 稍大、B 稍小，但都是拇指级
+  const ma = 12*VSC;                               // 圆键离边留多点，避开手势条
+  const ax = WINW - ma - ra, ay = bot - ma - ra;   // A：右下角
   PAD.a = {x:ax, y:ay, r:ra};
-  PAD.b = {x:ax-ra-rb-8, y:ay-rb-6, r:rb};       // B：A 的左上方
+  PAD.b = {x:ax - ra - rb - 12*VSC, y:ay - rb*0.38, r:rb};   // B：A 正左侧略高，同一排好按
 }
 function vpadHit(x,y){                           // 命中的按键 id
   if (!PAD.on) return null;
+  const pad = Math.max(4, PAD.k*0.08);           // 命中范围略放大，手指压边也算
   for (const id of ["up","down","left","right"]){
     const q=PAD[id];
-    if (x>=q.x-5 && x<=q.x+q.w+5 && y>=q.y-5 && y<=q.y+q.h+5) return id;
+    if (x>=q.x-pad && x<=q.x+q.w+pad && y>=q.y-pad && y<=q.y+q.h+pad) return id;
   }
   for (const id of ["a","b"]){
     const q=PAD[id];
-    if ((x-q.x)*(x-q.x)+(y-q.y)*(y-q.y) <= (q.r+9)*(q.r+9)) return id;
+    if ((x-q.x)*(x-q.x)+(y-q.y)*(y-q.y) <= (q.r+pad)*(q.r+pad)) return id;
   }
   return null;
 }
@@ -1837,6 +1851,7 @@ function fitCanvas(){
   }
   VOX = (WINW-640)/2;
   VOY = Math.max(0, Math.round((WINH-480-58)/2));   // 底部留出 UI 高度后整体居中
+  VSC = WINW / Math.max(1, ww);                     // 1 CSS px 对应的舞台逻辑长度
   crtDirty = true;
   // 画布缓冲按逻辑尺寸等比放大：x/y 缩放比完全一致，
   // 不会因为 innerHeight/innerWidth 的取整差异把底部按钮挤出可视区
@@ -1953,7 +1968,7 @@ function RenderTitle(){
                                       : "已组队：队长 "+net.partnerName+" · Enter 退出组队"),
                 0, 382+VOY, 14, "#ffd257", WINW/2, false);
   } else if (net.on){
-    outlineText(isTouch ? "点右下角在线人数 可查看玩家并邀请组队"
+    outlineText(isTouch ? "点右上角在线人数 可查看玩家并邀请组队"
                         : "Tab 选择玩家 · Enter 发出组队邀请",
                 0, 382+VOY, 13, "#8ea2d8", WINW/2, false);
   }
@@ -2454,7 +2469,8 @@ function Render(){
     }
     outlineText(isTouch?"← → 选择　A 确认":"← → 选择　Z 确认", 0, WINH*0.42+70, 14, "#c9d2e8", WINW/2, false);
   } else if (net.role && g_dead && g_deadChoice && g_state!==ST_LOSE){
-    rightText("观战中 · 暂停键退出", WINW-10, 46, 12, "#8fa0c8");
+    if (isTouch) outlineText("观战中 · 暂停键退出", 0, 8, 12, "#8fa0c8", WINW/2, false);
+    else rightText("观战中 · 暂停键退出", WINW-10, 46, 12, "#8fa0c8");
   }
 
   // ---- 联机暂停面板（不冻结游戏，盖在最上层）
@@ -2475,7 +2491,7 @@ function drawVPad(){
   for (const id of ["up","down","left","right"]){
     const q=PAD[id], p=pressed.has(id);
     ctx.save();
-    roundRect(q.x,q.y,q.w,q.h,9);
+    roundRect(q.x,q.y,q.w,q.h,Math.max(10,q.w*0.20));
     ctx.fillStyle = p ? "rgba(255,226,110,0.30)" : "rgba(10,8,20,0.26)";
     ctx.fill();
     ctx.strokeStyle = p ? "rgba(255,236,140,0.95)" : "rgba(212,222,255,0.42)";
@@ -2651,31 +2667,45 @@ function renderNetHUD(uiBot){
   } else if (net.invSent && (g_state===ST_TITLE||g_state===ST_MENU)){
     outlineText("已发出组队邀请，等待回应…", 0, 10, 14, "#c9d2e8", WINW/2, false);
   }
-  // ---- 右下角在线人数 / 队伍状态（右对齐，自动避让底部按钮行）
+  // ---- 在线人数 / 队伍状态
+  // 手机：右下角整块让给 A/B 拇指区 → 挪到右上角（战斗时贴在暂停键下方）
   const oc=netOnline();
   const lh=17;
   const inBattle = uiBot!==undefined && g_state!==ST_TITLE && g_state!==ST_MENU;
-  // 手机上右下角被 A/B 占了 → 整块上移
-  const bot = (inBattle ? uiBot-56 : WINH-14) - (isTouch?96:0);
-  const nLines = 1 + (net.role ? (isTouch?2:1) : 0);
-  const hy = bot - (15 + (nLines-1)*lh);
   const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#8a8a9a";
-  rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 15, st);
-  if (net.role){
-    const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
-    rightText(tag+"  与 "+net.partnerName, WINW-10, hy+lh, 12, "#c9d2e8");
-    if (isTouch) rightText("点此退队", WINW-10, hy+lh*2, 11, "#8fa0c8");
-    if (isTouch) hot(WINW-196, hy+lh-4, 190, lh*(isTouch?2:1)+4, netLeave);   // 手机：点队伍状态退队
+  let hy, panelTop;
+  if (isTouch){
+    hy = (g_state>=ST_INTRO && g_state!==ST_TITLE) ? 46 : 6;
+    rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 14, st);
+    if (net.role){
+      const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
+      rightText(tag+" 与 "+net.partnerName, WINW-10, hy+17, 11, "#c9d2e8");
+      rightText("点此退队", WINW-10, hy+31, 10, "#8fa0c8");
+      hot(WINW-212, hy+13, 204, 32, netLeave);        // 手机：点队伍状态退队
+    }
+    if (g_state===ST_TITLE || g_state===ST_MENU)
+      hot(WINW-160, hy-8, 154, 26, ()=>{ net.panel=!net.panel; net.selIdx=0; });
+    panelTop = hy + (net.role?48:24);                 // 面板从信息块下方展开
+  } else {
+    const bot = inBattle ? uiBot-56 : WINH-14;
+    const nLines = 1 + (net.role ? 1 : 0);
+    hy = bot - (15 + (nLines-1)*lh);
+    rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 15, st);
+    if (net.role){
+      const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
+      rightText(tag+"  与 "+net.partnerName, WINW-10, hy+lh, 12, "#c9d2e8");
+    }
+    // 在线人数可点（开/关玩家面板）
+    if (g_state===ST_TITLE || g_state===ST_MENU)
+      hot(WINW-150, hy-8, 144, 26, ()=>{ net.panel=!net.panel; net.selIdx=0; });
+    panelTop = hy-10;
   }
-  // 在线人数可点（开/关玩家面板）
-  if (g_state===ST_TITLE || g_state===ST_MENU)
-    hot(WINW-150, hy-8, 144, 26, ()=>{ net.panel=!net.panel; net.selIdx=0; });
   // ---- 玩家面板
   if (net.panel && (g_state===ST_TITLE||g_state===ST_MENU)){
     const L=netLobbyList();
     const pw=300, rowH=30, head=52, foot=26;
     const ph=head + Math.max(1,Math.min(L.length,6))*rowH + foot;
-    const px0=WINW-pw-16, py0=Math.max(8, hy-ph-10);
+    const px0=WINW-pw-16, py0=clamp(panelTop-ph, 8, WINH-ph-8);
     ctx.fillStyle="rgba(12,9,24,0.95)"; ctx.fillRect(px0,py0,pw,ph);
     ctx.strokeStyle="rgba(140,160,220,0.85)"; ctx.lineWidth=1.5; ctx.strokeRect(px0,py0,pw,ph);
     outlineText("在线玩家（Tab 切换 · Enter 邀请）", px0+14, py0+12, 13, "#9fb4e8", -1, false);
