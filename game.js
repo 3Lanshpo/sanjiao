@@ -1613,13 +1613,20 @@ function vpadLayout(){                           // 屏幕尺寸/安全区变了
   PAD.a = {x:ax, y:ay, r:ra};
   PAD.b = {x:ax - ra - rb - 12*VSC, y:ay - rb*0.38, r:rb};   // B：A 正左侧略高，同一排好按
 }
-function vpadHit(x,y){                           // 命中的按键 id
+function vpadHitDir(x,y){                        // 只判方向键（滑动换向用）
   if (!PAD.on) return null;
-  const pad = Math.max(4, PAD.k*0.08);           // 命中范围略放大，手指压边也算
+  const pad = Math.max(4, PAD.k*0.08);
   for (const id of ["up","down","left","right"]){
     const q=PAD[id];
     if (x>=q.x-pad && x<=q.x+q.w+pad && y>=q.y-pad && y<=q.y+q.h+pad) return id;
   }
+  return null;
+}
+function vpadHit(x,y){                           // 命中的按键 id
+  if (!PAD.on) return null;
+  const dir = vpadHitDir(x,y);
+  if (dir) return dir;
+  const pad = Math.max(4, PAD.k*0.08);           // 命中范围略放大，手指压边也算
   for (const id of ["a","b"]){
     const q=PAD[id];
     if ((x-q.x)*(x-q.x)+(y-q.y)*(y-q.y) <= (q.r+pad)*(q.r+pad)) return id;
@@ -1802,11 +1809,23 @@ cv.addEventListener("pointerdown", e=>{
   }
   touchStart={...p, t:performance.now()};
 });
+// 手指不离开屏幕、直接在方向键之间滑 → 立刻换向（真十字键手感）
+cv.addEventListener("pointermove", e=>{
+  if (!PAD.on || !vptr.has(e.pointerId)) return;
+  const cur = vptr.get(e.pointerId);
+  if (cur === "a" || cur === "b") return;          // A/B 不做滑动跟随
+  const p = toLogical(e.clientX, e.clientY);
+  const nid = vpadHitDir(p.x, p.y) || "none";       // "none" = 还记着这根手指，但没压在任何方向键上
+  if (nid === cur) return;
+  if (cur !== "none") keys.delete(VDIR[cur]);
+  vptr.set(e.pointerId, nid);
+  if (nid !== "none"){ keys.add(VDIR[nid]); pressKey(VDIR[nid]); }
+});
 function endPointer(e){
   const id = vptr.get(e.pointerId);
-  if (id){                                       // 松开虚拟方向键 → 立刻停
+  if (id !== undefined){                         // 松开虚拟方向键 → 立刻停
     vptr.delete(e.pointerId);
-    if (VDIR[id]) keys.delete(VDIR[id]);
+    if (id !== "none" && VDIR[id]) keys.delete(VDIR[id]);
     return;
   }
   if (!touchStart) return;
@@ -1824,7 +1843,7 @@ function endPointer(e){
 cv.addEventListener("pointerup", e=>{ e.preventDefault(); endPointer(e); });
 cv.addEventListener("pointercancel", e=>{
   const id = vptr.get(e.pointerId);
-  if (id){ vptr.delete(e.pointerId); if (VDIR[id]) keys.delete(VDIR[id]); }
+  if (id !== undefined){ vptr.delete(e.pointerId); if (id !== "none" && VDIR[id]) keys.delete(VDIR[id]); }
   touchStart=null;
 });
 window.addEventListener("blur", ()=>{ keys.clear(); vptr.clear(); });   // 切走时别让心一直往一个方向跑
