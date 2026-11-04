@@ -114,9 +114,10 @@ let g_hbMs=45;                                 // 弹幕阶段传心位置的间
 // 存在 localStorage 里，下次进来直接进标题，不再问名字。
 const SAVE_KEY = "sanjiao_profile_v1";
 const CHARS = [
-  { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6 },   // 原版待机动画 6 帧
-  { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4 },   // 4 帧
-  { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5 },   // 5 帧
+  // img/frames = 待机动画；atk/atkN = 原版挥刀动画（攻击时整段替换）
+  { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6, atk:"atk_kris",   atkN:7, atkS:1.00 },
+  { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50 },
+  { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70 },
 ];
 let g_profile = { name:"", skin:-1 };
 let g_createStage = 0;        // 0 = 起名，1 = 选外貌
@@ -753,7 +754,7 @@ const IMG_LIST = ["bg","jevil","soul","spade","diamond","club","knife","boom","s
 for (let i=0;i<8;i++){ IMG_LIST.push("jevil_jump_"+i); IMG_LIST.push("jevil_hurt_"+i); }
 for (let i=0;i<8;i++){ IMG_LIST.push("tenna_"+i); IMG_LIST.push("neo_"+i); IMG_LIST.push("pink_"+i); }
 for (let i=0;i<4;i++){ IMG_LIST.push("spamton_"+i); }
-for (const c of CHARS) IMG_LIST.push(c.img);        // 三名可选角色的待机动画条
+for (const c of CHARS){ IMG_LIST.push(c.img); IMG_LIST.push(c.atk); }   // 待机 + 原版挥刀
 
 const SFX = {};
 const SFX_LIST = ["snd_menu_move","snd_menu_select","snd_slash"];
@@ -2036,8 +2037,8 @@ function drawCharFrame(i, cx, cy, hgt, maxW){
 
 // ---------------- 场上的角色（左侧）与 Boss（右侧） ----------------
 const PATK = [null, null];                     // 两个槽位的出刀动画：{t,dur,kind}
-const PF_SOLO = { x:178, h:128 };              // 单人：一个人站中间偏左
-const PF_DUO  = [{ x:206, h:120 }, { x:96, h:100 }];    // 组队：0=自己（靠 Boss）、1=队友（后排）
+const PF_SOLO = { x:282, h:128 };              // 单人：站在 Boss 左前方（不冲刺）
+const PF_DUO  = [{ x:272, h:120 }, { x:162, h:100 }];   // 组队：0=自己（靠 Boss）、1=队友（后排）
 
 function partnerSkin(){
   if (!net.role) return -1;
@@ -2071,7 +2072,7 @@ function startPAttack(who, kind){
   if (who===1 && !net.role) return;
   const f=fighterList().find(x=>x.i===who);
   if (f && f.dead) return;
-  PATK[who]={ t:0, dur: kind==="fight"?0.50:0.42, kind:kind||"fight" };
+  PATK[who]={ t:0, dur: kind==="fight"?0.44:0.38, kind:kind||"fight" };
 }
 function updatePAttack(dt){
   for (let i=0;i<2;i++){
@@ -2080,9 +2081,6 @@ function updatePAttack(dt){
     a.t+=dt;
     if (a.t>=a.dur) PATK[i]=null;
   }
-}
-function atkDash(f){                           // 出刀时往前冲多远：一律冲到 Boss 跟前
-  return f.i===0 ? (net.role?94:120) : 180;    // 队友在后排，冲得更远但略靠后一点
 }
 function pAtkOffset(a, dash){                  // 冲出去 → 顿一下 → 收回
   if (!a) return 0;
@@ -2102,95 +2100,49 @@ function drawFighters(){
     const c=CHARS[f.skin]||CHARS[0], im=IMG[c.img];
     if (!im || !im.naturalWidth) continue;
     const n=c.frames, fw=im.naturalWidth/n, fh=im.naturalHeight;
-    const sc=f.h/fh, w=fw*sc, hh=fh*sc;
+    const sc=f.h/fh, w=fw*sc, hh=fh*sc;        // 像素缩放：待机与挥刀共用同一比例
     const a=PATK[f.i];
-    const dash=atkDash(f);
-    const off=pAtkOffset(a, dash);
-    const p=a ? clamp(a.t/a.dur,0,1) : -1;
     const bob=Math.sin(g_animT*3+f.i*1.7)*2.0;
-    let rot=0;
-    if (p>=0.26 && p<0.58) rot=-0.24;          // 冲到位：身体前倾俯冲（原版姿态）
-    else if (p>=0.58) rot=-0.24*(1-(p-0.58)/0.42);
-    const fr=Math.floor(g_animT*(a?14:7)+f.i*3)%n;
+    const lx=f.x-w/2-(1-inK)*70;               // 帧左缘基准（原版按帧左上角对齐）
     // 影子
     ctx.save();
     ctx.fillStyle="rgba(8,4,16,0.34)";
-    ctx.beginPath(); ctx.ellipse(f.x+off*0.6, GROUND_Y+2, w*0.40, 5.5, 0, 0, 6.29); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(f.x-(1-inK)*70, GROUND_Y+2, Math.max(18,w*0.40), 5.5, 0, 0, 6.29); ctx.fill();
     ctx.restore();
+    if (f.dead){                                // 倒地：身体平躺在地面线上
+      ctx.save();
+      ctx.imageSmoothingEnabled=false;
+      ctx.globalAlpha=0.70;
+      ctx.translate(f.x-(1-inK)*70, GROUND_Y-w*0.42);
+      ctx.rotate(1.50);
+      ctx.drawImage(im, 0, 0, fw, fh, -w/2, -hh, w, hh);
+      ctx.restore();
+      continue;
+    }
+    const aim = (a && c.atk) ? IMG[c.atk] : null;
     ctx.save();
     ctx.imageSmoothingEnabled=false;
     if (inK<1) ctx.globalAlpha=inK;
-    if (f.dead){
-      ctx.globalAlpha=0.70;
-      ctx.translate(f.x, GROUND_Y-w*0.42);
-      ctx.rotate(1.50);                        // 倒地：身体平躺在地面线上
+    if (aim && aim.naturalWidth){
+      // 攻击：整段换成原版挥刀动画，原地播放、帧底贴地
+      const an=c.atkN||1, afw=aim.naturalWidth/an, afh=aim.naturalHeight;
+      const p=clamp(a.t/a.dur,0,1);
+      const fr=Math.min(an-1, Math.floor(p*an*1.02));
+      const asc=sc*(c.atkS||1), aw2=afw*asc, ah2=afh*asc;
+      ctx.drawImage(aim, fr*afw, 0, afw, afh, lx-((aw2-afw*sc)/2), GROUND_Y-ah2, aw2, ah2);
     } else {
-      ctx.translate(f.x+off-(1-inK)*70, GROUND_Y+bob);
-      if (rot) ctx.rotate(rot);
+      // 待机：循环动画，轻微呼吸浮动
+      const fr=Math.floor(g_animT*7+f.i*3)%n;
+      ctx.drawImage(im, fr*fw, 0, fw, fh, lx, GROUND_Y+bob-hh, w, hh);
     }
-    ctx.drawImage(im, fr*fw, 0, fw, fh, -w/2, -hh, w, hh);
     ctx.restore();
     // 名字（让人一眼看出哪个是自己/队友）
-    if (f.name && !f.dead && !a){
+    if (f.name && !a){
       outlineText(f.name, 0, GROUND_Y-hh-15, 13, f.i===0?"#ffc9d2":"#a9d8ff",
-                  f.x+off-(1-inK)*70, false);
+                  f.x-(1-inK)*70, false);
     }
   }
 }
-// 一道两端收尖的水平光刃（原版斩击的形体：中间厚、两头尖的纺锤带）
-function slashBlade(cx, cy, len, thick, rot, alpha, core){
-  if (alpha<=0.01) return;
-  ctx.save();
-  ctx.translate(cx,cy); ctx.rotate(rot);
-  const half=len/2, N=26, pw=core?0.95:0.50;   // 指数越小两端收得越尖
-  ctx.beginPath();
-  for (let i=0;i<=N;i++){
-    const t=i/N, x=-half+len*t;
-    const y=-thick*Math.pow(Math.sin(Math.PI*t),pw)*0.5;
-    if (i) ctx.lineTo(x,y); else ctx.moveTo(x,y);
-  }
-  for (let i=N;i>=0;i--){
-    const t=i/N, x=-half+len*t;
-    ctx.lineTo(x, thick*Math.pow(Math.sin(Math.PI*t),pw)*0.5);
-  }
-  ctx.closePath();
-  ctx.fillStyle = core ? `rgba(255,255,255,${alpha})`
-                       : `rgba(255,250,232,${alpha})`;
-  ctx.fill();
-  ctx.restore();
-}
-// 挥刀特效：原版是水平方向的光刃横扫过 Boss —— 刀风外晕 + 主刃 + 纯白亮芯
-function drawFightFx(){
-  for (const f of fighterList()){
-    const a=PATK[f.i];
-    if (!a || f.dead || a.kind!=="fight") continue;
-    const p=clamp(a.t/a.dur,0,1);
-    if (p<0.26 || p>0.54) continue;
-    const q=(p-0.26)/0.28;                       // 0→1：刃出 → 消失
-    const al = q<0.18 ? q/0.18 : Math.pow(1-(q-0.18)/0.82, 1.1);
-    const hand=f.x + atkDash(f) + f.h*0.34;      // 刀刃从角色身前挥出
-    const tip = JEV_CX + JEV_W*0.54;             // 扫到 Boss 右侧
-    const len = Math.max(70, tip-hand) * (0.94+0.06*q);
-    const bx  = (hand+tip)*0.5;
-    const by=JEV_CY + JEV_H*0.06;
-    const th=Math.max(9, Math.min(22, JEV_H*0.075));
-    const rot=-0.09;                             // 几乎水平，只有极轻微上扬
-    const sx=f.x+atkDash(f)*0.5, sy=GROUND_Y-58;
-    ctx.save();
-    // 冲刺残影：从角色拉向 Boss 的一条淡带
-    ctx.fillStyle=`rgba(255,255,255,${0.10*al})`;
-    ctx.beginPath();
-    ctx.moveTo(sx, sy-11); ctx.lineTo(bx-len*0.40, by-5);
-    ctx.lineTo(bx-len*0.40, by+5); ctx.lineTo(sx, sy+11);
-    ctx.closePath(); ctx.fill();
-    ctx.restore();
-    slashBlade(bx, by, len*1.26, th*3.3, rot, 0.07*al, false);              // 外围辉光
-    slashBlade(bx, by, len*1.10, th*1.95, rot, 0.17*al, false);             // 刀风
-    slashBlade(bx, by, len,      th,     rot, 0.78*al, false);              // 主刃
-    slashBlade(bx, by, len*0.94, th*0.40,rot, Math.min(1, 1.25*al), true);  // 纯白亮芯
-  }
-}
-
 function drawAvatar(){
   if (!AVATAR.on || g_state===ST_CREATE) return;
   const p=AVATAR.pad, x=AVATAR.x-p, y=AVATAR.y-p;
@@ -2479,7 +2431,6 @@ function Render(){
     }
   }
   // 刀光画在 Boss 之上
-  drawFightFx();
   // 命中白闪
   if (g_hitFlash>0){
     ctx.fillStyle = `rgba(255,255,255,${Math.min(0.34,g_hitFlash*1.1)})`;
