@@ -1668,6 +1668,7 @@ function vpadHit(x,y){                           // 命中的按键 id
   return null;
 }
 function pressBack(){                            // B：返回 / 取消
+  if (g_state===ST_CREATE){ pressKey("x"); return; }
   if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
   if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
   if (net.invite){ netDeclineInvite(); return; }
@@ -2114,7 +2115,7 @@ function RenderCreate(){
     } else {
       outlineText(isTouch?"点 这 里 输 入 名 字":"点框里输入名字 或直接打字", 0, by+bh/2-12, 22, "rgba(180,196,230,0.5)", cx, false);
     }
-    outlineText(isTouch?"输入完按 A 确定":"输入后按 Z / Enter 确定", 0, 268+VOY, 15, "#b4d2ff", cx, false);
+    outlineText(isTouch?"输入完点键盘上的「完成」，或按 A 确定":"输入后按 Z / Enter 确定", 0, 268+VOY, 15, "#b4d2ff", cx, false);
     outlineText("名字随便起，组队时队友看到的就是它", 0, 294+VOY, 13, "#8ea2d8", cx, false);
   } else {
     outlineText("选 一 个 样 子", 0, 38+VOY, 34, "#ffec78", cx);
