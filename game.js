@@ -2037,7 +2037,7 @@ function drawCharFrame(i, cx, cy, hgt, maxW){
 // ---------------- 场上的角色（左侧）与 Boss（右侧） ----------------
 const PATK = [null, null];                     // 两个槽位的出刀动画：{t,dur,kind}
 const PF_SOLO = { x:178, h:128 };              // 单人：一个人站中间偏左
-const PF_DUO  = [{ x:96, h:120 }, { x:252, h:100 }];    // 组队：0=自己（前）、1=队友（后）
+const PF_DUO  = [{ x:206, h:120 }, { x:96, h:100 }];    // 组队：0=自己（靠 Boss）、1=队友（后排）
 
 function partnerSkin(){
   if (!net.role) return -1;
@@ -2081,12 +2081,15 @@ function updatePAttack(dt){
     if (a.t>=a.dur) PATK[i]=null;
   }
 }
-function pAtkOffset(a, dash){                  // 冲出去 → 停顿 → 收回
+function atkDash(f){                           // 出刀时往前冲多远：一律冲到 Boss 跟前
+  return f.i===0 ? (net.role?94:120) : 180;    // 队友在后排，冲得更远但略靠后一点
+}
+function pAtkOffset(a, dash){                  // 冲出去 → 顿一下 → 收回
   if (!a) return 0;
   const p=clamp(a.t/a.dur,0,1);
-  if (p<0.30){ const q=p/0.30; return dash*(1-Math.pow(1-q,3)); }
-  if (p<0.56) return dash;
-  const q=(p-0.56)/0.44; return dash*(1-q*q);
+  if (p<0.26){ const q=p/0.26; return dash*(1-Math.pow(1-q,3)); }   // 冲刺：先快后慢
+  if (p<0.58) return dash;
+  const q=(p-0.58)/0.42; return dash*Math.pow(1-q,2.0);             // 收回：起步快、落位稳
 }
 function drawFighters(){
   // 结算画面（GAME OVER / 胜利）有整屏覆盖文字，角色画上去只会变成残影
@@ -2101,13 +2104,13 @@ function drawFighters(){
     const n=c.frames, fw=im.naturalWidth/n, fh=im.naturalHeight;
     const sc=f.h/fh, w=fw*sc, hh=fh*sc;
     const a=PATK[f.i];
-    const dash=f.i===0 ? (net.role?74:120) : 96;
+    const dash=atkDash(f);
     const off=pAtkOffset(a, dash);
     const p=a ? clamp(a.t/a.dur,0,1) : -1;
     const bob=Math.sin(g_animT*3+f.i*1.7)*2.0;
     let rot=0;
-    if (p>=0.30 && p<0.56) rot=-0.16;
-    else if (p>=0.56) rot=-0.16*(1-(p-0.56)/0.44);
+    if (p>=0.26 && p<0.58) rot=-0.24;          // 冲到位：身体前倾俯冲（原版姿态）
+    else if (p>=0.58) rot=-0.24*(1-(p-0.58)/0.42);
     const fr=Math.floor(g_animT*(a?14:7)+f.i*3)%n;
     // 影子
     ctx.save();
@@ -2134,51 +2137,57 @@ function drawFighters(){
     }
   }
 }
-// 刀光：出刀瞬间在 Boss 身上扫过，再补一道从角色拉过去的残影
+// 一道两端收尖的水平光刃（原版斩击的形体：中间厚、两头尖的纺锤带）
+function slashBlade(cx, cy, len, thick, rot, alpha, core){
+  if (alpha<=0.01) return;
+  ctx.save();
+  ctx.translate(cx,cy); ctx.rotate(rot);
+  const half=len/2, N=26, pw=core?0.95:0.50;   // 指数越小两端收得越尖
+  ctx.beginPath();
+  for (let i=0;i<=N;i++){
+    const t=i/N, x=-half+len*t;
+    const y=-thick*Math.pow(Math.sin(Math.PI*t),pw)*0.5;
+    if (i) ctx.lineTo(x,y); else ctx.moveTo(x,y);
+  }
+  for (let i=N;i>=0;i--){
+    const t=i/N, x=-half+len*t;
+    ctx.lineTo(x, thick*Math.pow(Math.sin(Math.PI*t),pw)*0.5);
+  }
+  ctx.closePath();
+  ctx.fillStyle = core ? `rgba(255,255,255,${alpha})`
+                       : `rgba(255,250,232,${alpha})`;
+  ctx.fill();
+  ctx.restore();
+}
+// 挥刀特效：原版是水平方向的光刃横扫过 Boss —— 刀风外晕 + 主刃 + 纯白亮芯
 function drawFightFx(){
   for (const f of fighterList()){
     const a=PATK[f.i];
     if (!a || f.dead || a.kind!=="fight") continue;
     const p=clamp(a.t/a.dur,0,1);
-    if (p<0.26 || p>0.70) continue;
-    const q=(p-0.26)/0.44, al=Math.sin(q*Math.PI);
-    const bx=JEV_CX-JEV_W*0.06, by=JEV_CY-JEV_H*0.02;
-    const R=Math.max(44, Math.min(JEV_W,JEV_H)*0.30);
-    const sx=f.x+(f.i===0?(net.role?74:120):96)*0.5, sy=GROUND_Y-58;
+    if (p<0.26 || p>0.54) continue;
+    const q=(p-0.26)/0.28;                       // 0→1：刃出 → 消失
+    const al = q<0.18 ? q/0.18 : Math.pow(1-(q-0.18)/0.82, 1.1);
+    const hand=f.x + atkDash(f) + f.h*0.34;      // 刀刃从角色身前挥出
+    const tip = JEV_CX + JEV_W*0.54;             // 扫到 Boss 右侧
+    const len = Math.max(70, tip-hand) * (0.94+0.06*q);
+    const bx  = (hand+tip)*0.5;
+    const by=JEV_CY + JEV_H*0.06;
+    const th=Math.max(9, Math.min(22, JEV_H*0.075));
+    const rot=-0.09;                             // 几乎水平，只有极轻微上扬
+    const sx=f.x+atkDash(f)*0.5, sy=GROUND_Y-58;
     ctx.save();
-    // 冲刺残影
-    ctx.fillStyle=`rgba(255,255,255,${0.14*al})`;
+    // 冲刺残影：从角色拉向 Boss 的一条淡带
+    ctx.fillStyle=`rgba(255,255,255,${0.10*al})`;
     ctx.beginPath();
-    ctx.moveTo(sx, sy-14); ctx.lineTo(bx, by-6);
-    ctx.lineTo(bx, by+6);  ctx.lineTo(sx, sy+14);
+    ctx.moveTo(sx, sy-11); ctx.lineTo(bx-len*0.40, by-5);
+    ctx.lineTo(bx-len*0.40, by+5); ctx.lineTo(sx, sy+11);
     ctx.closePath(); ctx.fill();
-    ctx.translate(bx,by);
-    ctx.rotate(-0.85+q*0.34);
-    // 一道斜劈的月牙：弧带中点正好穿过 Boss 身体中心
-    const th=18*(0.62+0.5*al), a0=-1.0, a1=1.0, cx2=-R+th*0.5, N=16;
-    // 两端收尖的月牙：中间最厚，两头点状收尾
-    ctx.beginPath();
-    for (let i=0;i<=N;i++){
-      const t=i/N, ang=a0+(a1-a0)*t;
-      const x=cx2+Math.cos(ang)*R, y=Math.sin(ang)*R;
-      if (i) ctx.lineTo(x,y); else ctx.moveTo(x,y);
-    }
-    for (let i=N;i>=0;i--){
-      const t=i/N, ang=a0+(a1-a0)*t;
-      const rr=R-th*Math.pow(Math.sin(Math.PI*t),0.55);
-      ctx.lineTo(cx2+Math.cos(ang)*rr, Math.sin(ang)*rr);
-    }
-    ctx.closePath();
-    ctx.fillStyle=`rgba(255,255,255,${Math.min(1,1.25*al)})`;
-    ctx.fill();
-    ctx.strokeStyle=`rgba(255,236,158,${0.85*al})`;
-    ctx.lineWidth=1.6; ctx.stroke();
-    // 亮芯
-    ctx.beginPath();
-    ctx.arc(cx2,0,R-th*0.46,a0+0.16,a1-0.16,false);
-    ctx.strokeStyle=`rgba(255,255,255,${Math.min(1,1.4*al)})`;
-    ctx.lineWidth=2.6; ctx.stroke();
     ctx.restore();
+    slashBlade(bx, by, len*1.26, th*3.3, rot, 0.07*al, false);              // 外围辉光
+    slashBlade(bx, by, len*1.10, th*1.95, rot, 0.17*al, false);             // 刀风
+    slashBlade(bx, by, len,      th,     rot, 0.78*al, false);              // 主刃
+    slashBlade(bx, by, len*0.94, th*0.40,rot, Math.min(1, 1.25*al), true);  // 纯白亮芯
   }
 }
 
