@@ -110,6 +110,12 @@ let g_pauseUI=false;                           // 联机暂停：只开面板，
 let g_sliceCv=null, g_sliceCtx=null;           // 切屏后处理用的临时画布
 let g_hbMs=45;                                 // 弹幕阶段传心位置的间隔（公共 broker 高频会丢包，实测调）
 
+// 道具运行时：已用次数（每局/每回合重置）+ 本回合生效的增益 + 刚掉落的道具
+let g_gearUse = { scythe:0, tv:0, fuse:0, guitar:0 };
+let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0 };
+let g_lastDrop = "";
+let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具生效等）
+
 // ---------------- 存档：玩家档案（名字 + 外貌） ----------------
 // 存在 localStorage 里，下次进来直接进标题，不再问名字。
 const SAVE_KEY = "sanjiao_profile_v1";
@@ -119,7 +125,21 @@ const CHARS = [
   { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50 },
   { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70 },
 ];
-let g_profile = { name:"", skin:-1 };
+// ---------------- 道具（打赢 Boss 掉落） ----------------
+// per:"run" = 整场战斗限次；per:"turn" = 每回合限次（回合切换时恢复）
+const ITEMS = [
+  { key:"scythe", boss:0, name:"恶魔镰刀", short:"镰刀", color:"#c887ff",
+    per:"run",  max:1, perTxt:"本局一次", desc:"这次出刀伤害翻倍" },
+  { key:"tv",     boss:1, name:"电视机",   short:"电视", color:"#6fe0ff",
+    per:"run",  max:1, perTxt:"本局一次", desc:"本回合受击 30% 概率免伤" },
+  { key:"fuse",   boss:2, name:"引线",     short:"引线", color:"#ffa14a",
+    per:"run",  max:1, perTxt:"本局一次", desc:"本回合受到的伤害 -30%" },
+  { key:"guitar", boss:3, name:"电吉他",   short:"吉他", color:"#ff7ac8",
+    per:"turn", max:2, perTxt:"每回合 2 次", desc:"每次弹幕 -50%，两次静音" },
+];
+const ItemByKey = k => ITEMS.find(i=>i.key===k);
+
+let g_profile = { name:"", skin:-1, cleared:[false,false,false,false] };
 let g_createStage = 0;        // 0 = 起名，1 = 选外貌
 let g_createSel = 0;          // 外貌光标
 let g_nameBlink = 0;
@@ -132,7 +152,9 @@ function loadProfile(){
     if (!p || typeof p.name !== "string" || !p.name.trim()) return false;
     const skin = p.skin|0;
     if (!(skin>=0 && skin<CHARS.length)) return false;
-    g_profile = { name: p.name.trim().slice(0,12), skin };
+    const cl = Array.isArray(p.cleared) ? p.cleared : [];
+    g_profile = { name: p.name.trim().slice(0,12), skin,
+                  cleared: [0,1,2,3].map(i=>!!cl[i]) };
     return true;
   } catch(e){ return false; }
 }
@@ -468,6 +490,11 @@ function netTeamMsg(m){
     // 已经出过刀在等队友 → 开打；已经阵亡（观战）且停在菜单里 → 也要继续推进，
     // 否则死掉的那一方会永远卡在菜单，队长不发 atk，活着的人只能干等
     if (net.myAct && (g_state===ST_WAIT || (g_dead && g_state===ST_MENU))) netBothActed();
+  } else if (m.t==="gtr"){                               // 队友弹了电吉他 → 队长这边放宽本回合弹幕
+    if (m.turn===undefined || m.turn===g_turn){
+      const gk="g"+m.from+":"+m.turn+":"+m.n;            // 重发包只算一次
+      if (net.gtrSeen!==gk){ net.gtrSeen=gk; g_buff.guitar=Math.min(2, g_buff.guitar+1); }
+    }
   } else if (m.t==="pick"){                              // 队友吃掉一颗爱心：本地同步移除，别让它被快照复活
     for (const b of g_bullets) if (b._sid===m.sid){ b.x=-9999; b._taken=true; }
   } else if (m.t==="bye"){                               // 队友退出
@@ -491,12 +518,15 @@ function netTeamMsg(m){
   } else if (m.t==="st" && isMember()){                  // 状态同步（胜负/台词）
     if (m.s===g_state) return;                           // QoS1 重复消息
     if (m.s===ST_WIN||m.s===ST_LOSE){
-      g_state=m.s; g_stateT=0; Say(m.txt||"");
+      if (m.s===ST_WIN){ AwardDrop(g_boss); g_state=ST_WIN; }   // 队友看到的胜利也算通关掉落
+      else g_state=m.s;
+      g_stateT=0; Say(m.txt||"");
     } else if (m.s===ST_MENU){
       // 我正在结算自己的行动（出刀条/伤害/对话/等队友）时不能被队长的菜单重发打断
       if (g_state===ST_FIGHT||g_state===ST_DMG||g_state===ST_DIALOG||
           g_state===ST_SUB||g_state===ST_WAIT) return;
       if (g_state===ST_ATTACK) g_turn++;                 // 回合号跟队长对齐
+      clearTurnBuffs();
       g_state=ST_MENU; g_stateT=0; g_bullets=[]; Say(m.txt||"");
       net.myAct=false; net.pAct=false;
       if (net.pActPending){ net.pActPending=false; net.pAct=true; }
@@ -816,12 +846,55 @@ function frameCount(prefix, max){
   let n=0; for (let i=0;i<max;i++){ const im=IMG[prefix+i]; if (im && im.naturalWidth) n++; } return n;
 }
 
+// ---------------- 道具逻辑 ----------------
+function hasGear(k){
+  const it = ItemByKey(k);
+  return !!(it && g_profile.cleared && g_profile.cleared[it.boss]);
+}
+function gearLeft(k){
+  const it = ItemByKey(k);
+  return it ? Math.max(0, it.max - (g_gearUse[k]||0)) : 0;
+}
+function ownedGear(){ return ITEMS.filter(i=>hasGear(i.key)); }
+// 音波干扰：一层让弹幕密度减半（发射间隔 ×2、弹速同步变慢）；叠满两层直接静音本回合
+function gearRate(){ return g_buff.guitar>0 ? Math.pow(0.5, Math.min(2,g_buff.guitar)) : 1; }
+function gearMuted(){ return g_buff.guitar>=2; }
+function clearTurnBuffs(){                 // 一个对手回合结束 → 回合制增益全清，吉他次数回满
+  g_buff.tv=false; g_buff.fuse=false; g_buff.guitar=0;
+  g_gearUse.guitar=0;
+}
+function setToast(txt, col){ g_toast={txt, t:2.2, col:col||"#ffe878"}; }
+function AwardDrop(boss){                  // 打赢/饶恕都算通关，存档记下并掉落道具
+  const it = ITEMS[boss]; if (!it) return;
+  if (!Array.isArray(g_profile.cleared)) g_profile.cleared=[false,false,false,false];
+  g_profile.cleared[boss]=true;
+  g_lastDrop=it.key;
+  saveProfile();
+}
+function itemList(){                       // ITEM 子菜单：软糖 + 已拥有的道具
+  const list=[{kind:"candy"}];
+  for (const g of ownedGear()) list.push({kind:"gear", key:g.key});
+  return list;
+}
+function itemLabel(it){
+  if (it.kind==="candy") return `魔法软糖 ×${g_items}`;
+  const g=ItemByKey(it.key);
+  return `${g.name} ${gearLeft(g.key)}/${g.max}`;
+}
+function itemHint(it){
+  if (it.kind==="candy") return g_items>0 ? "回复 60 HP" : "已经吃光了";
+  return ItemByKey(it.key).desc;
+}
+
 // ---------------- 流程 ----------------
 function Say(s){ g_subtitle = s; }
 
 function ResetGame(){
   const B = Boss();
   g_hp=PLAYER_MAXHP; g_items=3; g_pacify=0; g_turn=0;
+  g_gearUse={scythe:0,tv:0,fuse:0,guitar:0};        // 新一场：道具次数回满
+  g_buff={scythe:false,tv:false,fuse:false,guitar:0};
+  g_lastDrop=""; g_toast=null;
   g_jevHp=B.maxhp; g_jevHpShown=false; g_spareReady=false;
   g_state=ST_INTRO; g_stateT=0; g_sub=SM_NONE; g_btnSel=0;
   g_bullets=[]; g_dmg=[]; g_sparks=[];
@@ -868,7 +941,7 @@ function SpawnBulletAt(t,x,y,vx,vy,r){
     phase:rnd(0,6.28), life:0, dmg:12});
 }
 function FirePattern(){
-  const ramp = 1.0 + Math.min(1.0, g_turn*0.10);
+  const ramp = (1.0 + Math.min(1.0, g_turn*0.10)) * gearRate();
   const pw = Boss().patW;
   if (g_pattern===P_CAROUSEL){
     const rxs=[58,96,128,150], rys=[24,42,54,63];
@@ -923,6 +996,17 @@ function playVoice(file){
 // ---------------- 命中 ----------------
 function HitPlayer(dmg){
   if (g_inv>0 || g_dead) return;
+  // 电视机：本回合每次受击都有 30% 概率被信号吃掉（免伤）
+  if (g_buff.tv && rnd(0,1) < 0.30){
+    g_inv=0.55;
+    AddRing(g_heartX, g_heartY, 46, 130, 225, 255);
+    for (let i=0;i<7;++i)
+      g_sparks.push({x:g_heartX+rnd(-12,12), y:g_heartY+rnd(-12,12), t:0, scale:rnd(0.5,0.95)});
+    g_dmg.push({x:g_heartX, y:g_heartY-16, vy:-46, life:0.75, val:0, miss:true});
+    playSfx("snd_menu_move");
+    return;
+  }
+  if (g_buff.fuse) dmg = Math.max(1, Math.round(dmg*0.7));    // 引线：本回合受到的伤害 -30%
   g_hp-=dmg; g_inv=1.0; g_redFlash=0.35;
   AddShake(0.25,5);
   BurstParts(g_heartX,g_heartY,10,130,255,80,110,0.5);
@@ -955,9 +1039,13 @@ function HitJevil(dmg){
     for (let i=0;i<8;++i)
       g_sparks.push({x:JEV_CX+rnd(-70,70), y:JEV_CY+rnd(-80,80), t:0, scale:rnd(1.2,2.2)});
     BurstParts(JEV_CX,JEV_CY,30,260,255,250,200,0.9);
-    g_state=ST_WIN; g_stateT=0;
-    Say(`${Boss().name} 倒下了……`);
+    WinBattle(`${Boss().name} 倒下了……`);
   }
+}
+function WinBattle(txt){                       // 打赢/饶恕都走这里：记通关 + 掉道具
+  if (g_state!==ST_WIN) AwardDrop(g_boss);
+  g_state=ST_WIN; g_stateT=0;
+  Say(txt||"");
 }
 function DoAttack(dmg){        // 出刀：队长端权威扣血；队员端只出表现，血量等队长快照回灌
   if (isMember()){
@@ -970,6 +1058,44 @@ function DoAttack(dmg){        // 出刀：队长端权威扣血；队员端只�
     return;
   }
   HitJevil(dmg);
+}
+// 使用掉落道具。返回：
+//  "fight" = 已转入出刀时机条 / "action" = 已开始对话（耗掉本回合行动）
+//  "free"  = 不消耗行动（电吉他）/ "fail" = 用不了
+function UseGear(key, after){
+  const g = ItemByKey(key);
+  if (!g || !hasGear(key)) return "fail";
+  if (gearLeft(key) <= 0){
+    setToast(g.per==="turn" ? `${g.name}：本回合的次数用完了` : `${g.name}：本局已经用过了`, "#ff9a9a");
+    return "fail";
+  }
+  g_gearUse[key]++;
+  if (key==="scythe"){
+    g_buff.scythe=true;
+    setToast("恶魔镰刀出鞘 —— 这一刀伤害翻倍！", "#d9a6ff");
+    AddRing(JEV_CX, JEV_CY, 90, 200, 140, 255);
+    playSfx("snd_menu_select");
+    g_btnSel=0; g_state=ST_FIGHT; g_stateT=0; g_barX=250; g_barHit=false;
+    return "fight";
+  }
+  if (key==="tv"){
+    g_buff.tv=true;
+    StartDialog("电视机亮起雪花 —— 这回合每次受击都有 30% 概率被信号吃掉！", after);
+  } else if (key==="fuse"){
+    g_buff.fuse=true;
+    StartDialog("引线嘶嘶作响 —— 这回合受到的伤害降低 30%！", after);
+  } else if (key==="guitar"){
+    g_buff.guitar=Math.min(2, g_buff.guitar+1);
+    const gt = g_buff.guitar>=2 ? "音波干扰拉满 —— 本回合弹幕全部静音！"
+                               : "音波干扰 —— 本回合弹幕频率 -50%（再弹一次可静音）";
+    setToast(gt+"（不消耗行动）", "#ff9ad4");
+    AddRing(JEV_CX, JEV_CY, 70, 255, 140, 220);
+    playSfx("snd_menu_select");
+    if (isMember()) netRtcSend({t:"gtr", from:net.cid, turn:g_turn, n:g_gearUse.guitar}, 1, 2);   // 让队长放宽本回合弹幕
+    return "free";
+  }
+  g_actionKind="item"; g_actionDmg=0;
+  return "action";
 }
 function DoPlayerAction(){
   const B = Boss();
@@ -988,19 +1114,29 @@ function DoPlayerAction(){
     }
     g_actionKind="act"; g_actionDmg=0;
   } else if (g_sub===SM_ITEM){
-    if (g_items>0){
-      g_items--; g_hp=Math.min(PLAYER_MAXHP, g_hp+60);
-      g_dmg.push({x:JEV_CX, y:JEV_CY-60, vy:-40, life:0.8, val:60, miss:false});
-      StartDialog("你吃掉了魔法软糖，回复了 60 HP！", after);
-    } else StartDialog("软糖吃光了……", after);
-    g_actionKind="item"; g_actionDmg=0;
+    const list=itemList();
+    const it=list[clamp(g_subSel,0,list.length-1)];
+    if (!it){ g_state=ST_MENU; g_sub=SM_NONE; return; }
+    if (it.kind==="candy"){
+      if (g_items>0){
+        g_items--; g_hp=Math.min(PLAYER_MAXHP, g_hp+60);
+        g_dmg.push({x:JEV_CX, y:JEV_CY-60, vy:-40, life:0.8, val:60, miss:false});
+        StartDialog("你吃掉了魔法软糖，回复了 60 HP！", after);
+      } else StartDialog("软糖吃光了……", after);
+      g_actionKind="item"; g_actionDmg=0;
+    } else {
+      const r = UseGear(it.key, after);
+      g_sub=SM_NONE;
+      if (r==="free"){ g_sub=SM_ITEM; return; }      // 吉他不消耗行动：留在道具页可再点一次
+      if (r==="fail"){ g_state=ST_MENU; g_subSel=0; } // 用完/没拥有：退回指令行
+      return;
+    }
   } else if (g_sub===SM_MERCY){
     if (g_subSel===0){
       if (g_spareReady){
         for (let i=0;i<10;++i)
           g_sparks.push({x:JEV_CX+rnd(-80,80), y:JEV_CY+rnd(-90,90), t:0, scale:rnd(1.0,2.0)});
-        g_state=ST_WIN; g_stateT=0;
-        Say(`${B.name} 安静下来，睡了一个好觉……`);
+        WinBattle(`${B.name} 安静下来，睡了一个好觉……`);
         g_sub=SM_NONE;
         return;
       } else {
@@ -1032,6 +1168,7 @@ function AfterAction(kind, dmg){               // 本回合自己的行动结束
 function Update(dt){
   if (g_hitStop>0){ g_hitStop-=dt; dt*=0.15; }
   g_animT += dt;
+  if (g_toast){ g_toast.t-=dt; if (g_toast.t<=0) g_toast=null; }
   updatePAttack(dt);
   if (g_inv>0) g_inv-=dt;
   if (g_hitFlash>0) g_hitFlash-=dt;
@@ -1120,7 +1257,7 @@ function Update(dt){
   case ST_ATTACK: {
     const B = Boss();
     g_stateT+=dt;
-    const ramp = (1.0+Math.min(1.0,g_turn*0.10))*B.patW;
+    const ramp = (1.0+Math.min(1.0,g_turn*0.10))*B.patW*gearRate();   // 音波干扰：ramp 越小 → 弹幕越稀
 
     // 红心移动（键盘方向键 / 屏幕方向键都写进同一个 keys）
     let sp = HEART_SPD*dt;
@@ -1143,7 +1280,7 @@ function Update(dt){
     }
 
     // 预警→开火（成员端不刷弹，只跑子弹更新；子弹由队长事件转发）
-    const firing = g_stateT>=B.warn && !isMember();
+    const firing = g_stateT>=B.warn && !isMember() && !gearMuted();
     if (firing && !g_fired){ g_fired=true; FirePattern(); }
 
     if (firing){
@@ -1602,6 +1739,7 @@ function Update(dt){
     if (g_stateT>B.dur && g_state===ST_ATTACK){
       g_bullets=[];
       g_turn++;
+      clearTurnBuffs();                         // 对手回合结束：本回合增益失效
       g_state=ST_MENU; g_stateT=0; Say("");
       net.myAct=false; net.pAct=false;          // 新回合：双方重新对表
       if (net.pActPending){ net.pActPending=false; net.pAct=true; }   // 上一回合末尾收到的行动
@@ -1816,7 +1954,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     }
     break;
   case ST_SUB: {
-    const n = g_sub===SM_ACT?2 : g_sub===SM_ITEM?1 : 2;
+    const n = g_sub===SM_ACT?2 : g_sub===SM_ITEM?itemList().length : 2;
     if (vk==="ArrowUp"){ g_subSel=(g_subSel+n-1)%n; playSfx("snd_menu_move"); }
     if (vk==="ArrowDown"){ g_subSel=(g_subSel+1)%n; playSfx("snd_menu_move"); }
     if (vk==="x"){ g_state=ST_MENU; g_sub=SM_NONE; playSfx("snd_menu_move"); }
@@ -1830,11 +1968,17 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
       let acc=1.0-Math.abs(g_barX-c)/71.0;
       if (acc<0) acc=0;
       g_pendingDmg=Math.floor(16+acc*acc*acc*58);
+      if (g_buff.scythe){                            // 恶魔镰刀：这一次出刀伤害翻倍
+        g_pendingDmg*=2; g_buff.scythe=false;
+        setToast(`恶魔镰刀 —— 伤害 ×2（${g_pendingDmg}）`, "#d9a6ff");
+        AddRing(JEV_CX, JEV_CY, 110, 200, 140, 255);
+        AddShake(0.2,4);
+      }
       g_barHit=true;
       g_actionKind="fight"; g_actionDmg=g_pendingDmg;
       startPAttack(0, g_pendingDmg>0?"fight":"miss");     // 自己冲出去砍一刀
       DoAttack(g_pendingDmg);
-      g_state=ST_DMG; g_stateT=0;
+      if (g_jevHp>0){ g_state=ST_DMG; g_stateT=0; }        // 打死了就别覆盖成结算动作（否则看不到胜利画面）
     }
     break;
   case ST_WIN: case ST_LOSE:
@@ -1983,6 +2127,49 @@ function rightText(s, rx, y, size, color, bold=true){   // 以 rx 为右边界�
   ctx.font = `${bold?"bold ":""}${size}px "Microsoft YaHei","PingFang SC",sans-serif`;
   const w = ctx.measureText(s).width;
   outlineText(s, rx-w/2, y, size, color, rx-w/2, bold);
+}
+
+// ---- 道具小图标（纯矢量，尺寸按 s 缩放，中心 cx,cy）
+function drawItemIcon(key, cx, cy, s){
+  const k = s/32;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.lineCap="round"; ctx.lineJoin="round";
+  if (key==="scythe"){
+    ctx.strokeStyle="#e8d8a8"; ctx.lineWidth=3*k;
+    ctx.beginPath(); ctx.moveTo(-7*k,13*k); ctx.lineTo(7*k,-8*k); ctx.stroke();
+    ctx.strokeStyle="#c887ff"; ctx.lineWidth=5*k;
+    ctx.beginPath(); ctx.arc(9*k,-7*k, 11*k, Math.PI*0.90, Math.PI*1.90); ctx.stroke();
+    ctx.strokeStyle="rgba(255,255,255,0.9)"; ctx.lineWidth=1.6*k;
+    ctx.beginPath(); ctx.arc(9*k,-7*k, 11*k, Math.PI*0.95, Math.PI*1.82); ctx.stroke();
+  } else if (key==="tv"){
+    ctx.strokeStyle="#9ad6ff"; ctx.lineWidth=2*k;
+    ctx.beginPath(); ctx.moveTo(-4*k,-6*k); ctx.lineTo(-9*k,-14*k); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(4*k,-6*k);  ctx.lineTo(9*k,-14*k);  ctx.stroke();
+    ctx.fillStyle="#243a52"; ctx.strokeStyle="#6fe0ff"; ctx.lineWidth=2.4*k;
+    roundRect(-12*k,-7*k, 24*k, 18*k, 3*k); ctx.fill(); ctx.stroke();
+    ctx.fillStyle="rgba(150,240,255,0.45)"; ctx.fillRect(-9*k,-4*k, 13*k, 12*k);
+  } else if (key==="fuse"){
+    ctx.strokeStyle="#e8b070"; ctx.lineWidth=3*k;
+    ctx.beginPath();
+    for (let i=0;i<=10;++i){ const t=i/10; ctx.lineTo(-13*k+t*20*k, Math.sin(t*7)*5*k); }
+    ctx.stroke();
+    ctx.fillStyle="#ffd257";
+    for (let i=0;i<5;++i){
+      const a=i*1.2566+0.3;
+      ctx.beginPath(); ctx.arc(10*k+Math.cos(a)*5*k, Math.sin(a)*5*k, 1.8*k, 0, 6.2832); ctx.fill();
+    }
+    ctx.fillStyle="#ff8a3c";
+    ctx.beginPath(); ctx.arc(10*k,0,3.2*k,0,6.2832); ctx.fill();
+  } else {
+    ctx.strokeStyle="#e8d8a8"; ctx.lineWidth=3*k;
+    ctx.beginPath(); ctx.moveTo(3*k,-13*k); ctx.lineTo(12*k,5*k); ctx.stroke();
+    ctx.fillStyle="#ff7ac8"; ctx.strokeStyle="#ffd0ec"; ctx.lineWidth=2*k;
+    ctx.beginPath(); ctx.ellipse(0,5*k, 10*k, 8*k, -0.6, 0, 6.2832); ctx.fill(); ctx.stroke();
+    ctx.fillStyle="#3a1430";
+    ctx.beginPath(); ctx.arc(0,5*k, 3*k, 0, 6.2832); ctx.fill();
+  }
+  ctx.restore();
 }
 function GetCrt(){
   if (crtCanvas && !crtDirty) return crtCanvas;
@@ -2291,13 +2478,20 @@ function RenderTitle(){
       drawImg(im, x+w/2, cy, iw*k, ih*k);
       ctx.restore();
     }
-    outlineText(BOSSES[i].name, 0, y+142, 22, sel?"#fff08c":"#d6d2dc", x+w/2);
+    outlineText(BOSSES[i].name, 0, y+138, 22, sel?"#fff08c":"#d6d2dc", x+w/2);
     let sub = BOSSES[i].title;
     const dot = sub.indexOf("·");
     if (dot>=0) sub = sub.slice(dot+1);
-    outlineText(sub, 0, y+172, 15, "#bec8dc", x+w/2, false);
+    outlineText(sub, 0, y+164, 15, "#bec8dc", x+w/2, false);
     let star=""; for (let s=0;s<=i;++s) star+="★";
-    outlineText(star, 0, y+192, 15, "#ff7896", x+w/2, false);
+    outlineText(star, 0, y+182, 15, "#ff7896", x+w/2, false);
+    // 打赢过：卡牌下方盖章（同时提示掉落的道具）
+    if (g_profile.cleared && g_profile.cleared[i]){
+      const it=ITEMS[i];
+      ctx.fillStyle="rgba(120,255,180,0.13)";
+      ctx.fillRect(x+6, y+195, w-12, 15);
+      outlineText(`√ 成功 · ${it.short}`, 0, y+196, 12, "#8ff0b8", x+w/2, false);
+    }
   }
   outlineText(isTouch?"方向键选择　A 开战　·　点右上角头像可改名":"← → 选择　Z 开战　·　点右上角头像可改名", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
   // 联机信息
@@ -2648,7 +2842,7 @@ function Render(){
   }
 
   // ---- 字幕（预警阶段框沿已经写着同一句招式名，别再叠一遍）
-  if (g_subtitle){
+  if (g_subtitle && g_state!==ST_WIN && g_state!==ST_LOSE){
     let dup=false;
     if (g_state===ST_ATTACK && g_stateT<Boss().warn){
       for (let i=0;i<4;++i) if (Boss().pat[i]===g_pattern && Boss().patLine[i]===g_subtitle){ dup=true; break; }
@@ -2666,6 +2860,14 @@ function Render(){
     ctx.fillStyle="rgba(255,255,200,0.9)"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),6);
     ctx.strokeStyle="rgba(240,240,245,1)"; ctx.lineWidth=1.6; ctx.strokeRect(46,byy,110,18);
     outlineText(`${Math.ceil(g_hp)}/${Math.floor(PLAYER_MAXHP)}`, 160, byy-2, 15, "#fff", -1, false);
+
+    // 本回合生效的道具增益（小字贴在 HP 右侧，免得挤占战斗区）
+    const bl=[];
+    if (g_buff.scythe) bl.push("镰刀待发 ×2");
+    if (g_buff.tv) bl.push("电视护盾 30%");
+    if (g_buff.fuse) bl.push("引线 -30%");
+    if (g_buff.guitar>0) bl.push(`音波 ×${g_buff.guitar}`);
+    if (bl.length) outlineText(bl.join("　"), 272, byy+1, 11, "#8fe6ff", -1, false);
 
     // 战斗菜单四项（常驻显示，用方向键选、A 确认）
     const btnKeys=["btn_fight","btn_act","btn_item","btn_mercy"];
@@ -2716,23 +2918,39 @@ function Render(){
   // ---- 子菜单（画在战斗框上，跟随场景偏移）
   if (g_state===ST_SUB){
     ctx.save(); ctx.translate(VOX,VOY);
-    let opts=[], n=0;
-    if (g_sub===SM_ACT){ opts=["检查","安抚"]; n=2; }
-    if (g_sub===SM_ITEM){ opts=[g_items?"魔法软糖（回复60）":"（空空如也）"]; n=1; }
-    if (g_sub===SM_MERCY){ opts=["饶恕","逃跑"]; n=2; }
-    for (let i=0;i<n;++i){
-      const y=BOX_Y0+24+i*42;
-      outlineText(opts[i], BOX_X0+46, y-10, 22, i===g_subSel?"#fff":"#d8c8d2", -1);
-      if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
-        drawImg(img("soul"), BOX_X0+26, y, 26,26); ctx.restore(); }
+    if (g_sub===SM_ITEM){
+      // 道具页：软糖 + 掉落的四件道具，右侧一行写效果
+      const list=itemList(), rowH=21, y0=BOX_Y0+16;
+      for (let i=0;i<list.length;++i){
+        const it=list[i], y=y0+i*rowH, sel=(i===g_subSel);
+        const used = it.kind==="candy" ? (g_items<=0) : (gearLeft(it.key)<=0);
+        if (sel){
+          ctx.fillStyle="rgba(255,236,140,0.13)";
+          ctx.fillRect(BOX_X0+12, y-3, BOX_X1-BOX_X0-24, rowH-2);
+          ctx.save(); ctx.imageSmoothingEnabled=false;
+          drawImg(img("soul"), BOX_X0+18, y-2, 15,15); ctx.restore();
+        }
+        const col = sel ? "#fffbe0" : (used?"rgba(150,152,172,0.72)":"#d8c8d2");
+        outlineText(itemLabel(it), BOX_X0+39, y-3, 16, col, -1);
+        outlineText(used?"已用完":itemHint(it), BOX_X0+190, y, 12,
+                    used?"rgba(160,160,180,0.65)":"#93a8d8", -1, false);
+      }
+    } else {
+      const opts = g_sub===SM_ACT ? ["检查","安抚"] : ["饶恕","逃跑"];
+      for (let i=0;i<2;++i){
+        const y=BOX_Y0+24+i*42;
+        outlineText(opts[i], BOX_X0+46, y-10, 22, i===g_subSel?"#fff":"#d8c8d2", -1);
+        if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
+          drawImg(img("soul"), BOX_X0+26, y, 26,26); ctx.restore(); }
+      }
+      if (g_sub===SM_MERCY && g_spareReady){
+        const im=img("sparkle");
+        if (im){ ctx.save(); ctx.imageSmoothingEnabled=false;
+          drawImg(im, BOX_X1-40, BOX_Y0+30, 36,36, g_animT*160); ctx.restore(); }
+        outlineText("!!", BOX_X1-66, BOX_Y0+20, 22, "#ffe65a", -1);
+      }
+      outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+12, 15, "#9aa8c8", -1, false);
     }
-    if (g_sub===SM_MERCY && g_spareReady){
-      const im=img("sparkle");
-      if (im){ ctx.save(); ctx.imageSmoothingEnabled=false;
-        drawImg(im, BOX_X1-40, BOX_Y0+30, 36,36, g_animT*160); ctx.restore(); }
-      outlineText("!!", BOX_X1-66, BOX_Y0+20, 22, "#ffe65a", -1);
-    }
-    outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+12, 15, "#9aa8c8", -1, false);
     ctx.restore();
   }
 
@@ -2762,12 +2980,26 @@ function Render(){
     const flavor = g_state===ST_WIN
       ? (g_spareReady ? `${Boss().name}安静下来，做了一个甜甜的梦……` : `${Boss().name}被打倒了，混沌暂时散去……`)
       : (net.role ? "两个人都倒下了……再试一次？" : "但你还有机会——重新挑战，或者换个对手。");
-    outlineText(flavor, 0, 240, 20, "#ebd8c8", WINW/2);
+    outlineText(flavor, 0, 232, 20, "#ebd8c8", WINW/2);
+    let tipY = 330;
+    if (g_state===ST_WIN && g_lastDrop){
+      const it=ItemByKey(g_lastDrop);
+      if (it){
+        const cy=274, label=`获得道具：${it.name}`;
+        ctx.font=`bold 22px "Microsoft YaHei","PingFang SC",sans-serif`;
+        const tw=ctx.measureText(label).width;
+        const lx=WINW/2+14;                        // 文字中心（左移留出图标位）
+        drawItemIcon(g_lastDrop, lx-tw/2-26, cy+11, 30);
+        outlineText(label, 0, cy, 22, it.color, lx);
+        outlineText(`${it.perTxt} · ${it.desc}　·　战斗里在 ITEM 中使用`, 0, cy+32, 13, "#c8d4ee", WINW/2, false);
+        tipY = 356;
+      }
+    }
     if ((g_animT%1)<0.65){
       const tip = isMember()
         ? (isTouch?"点队伍状态 退出队伍":"Enter 退出队伍")
         : (isTouch?"按 A 重新挑战":"Z 重新挑战　　ESC 返回主界面");
-      outlineText(tip, 0, 330, 22, "#fff", WINW/2);
+      outlineText(tip, 0, tipY, 22, "#fff", WINW/2);
     }
   }
 
@@ -2832,6 +3064,14 @@ function Render(){
   // ---- 操作提示
   if (g_state===ST_MENU && !isTouch)
     outlineText("方向键选择  Z确认  X取消", 12, 10, 15, "#b4d2ff", -1, false);
+
+  // ---- 道具生效提示（顶部短暂浮现）
+  if (g_toast){
+    const a=Math.min(1, g_toast.t*1.7);
+    ctx.save(); ctx.globalAlpha=a;
+    outlineText(g_toast.txt, 0, 8, 18, g_toast.col, WINW/2);
+    ctx.restore();
+  }
 
   // ---- 右上角自己的角色（存档选的外貌，一直显示）
   drawAvatar();
