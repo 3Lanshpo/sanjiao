@@ -29,10 +29,21 @@
     text-align: center; color: #9fb4d8; font-size: 13px;
     font-family: "Microsoft YaHei", sans-serif; pointer-events: none; z-index: 20;
   }
+  /* 起名输入：看不见的输入框，摆在画布上名字框的位置，点它就会弹系统键盘 */
+  #nameIn {
+    position: fixed; left: 0; top: 0; width: 0; height: 0;
+    padding: 0; margin: 0; border: 0; outline: 0; border-radius: 0;
+    background: transparent; color: transparent; caret-color: transparent;
+    font-size: 16px;  /* 小于 16px 时 iOS 会在聚焦时缩放页面 */
+    opacity: 0; pointer-events: none; z-index: 5;
+    -webkit-user-select: text; user-select: text;
+  }
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="cv"></canvas></div>
+<input id="nameIn" type="text" maxlength="12" autocomplete="off" autocorrect="off"
+       autocapitalize="off" spellcheck="false" enterkeyhint="done" aria-label="名字">
 <div id="rotate">↻ 建议横屏游玩</div>
 <div id="loading">
   <div>混沌加载中……</div>
