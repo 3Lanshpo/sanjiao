@@ -9,7 +9,11 @@ let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展�
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
 const BOX_CX = (BOX_X0 + BOX_X1) * 0.5, BOX_CY = (BOX_Y0 + BOX_Y1) * 0.5;
-const JEV_CX = 320, JEV_CY = 140;
+// 场上站位：战斗框上沿就是「地面」，角色与 Boss 都踩在这条线上
+const GROUND_Y = 272;
+const P_HOME_X = 434;            // Boss 站在右侧
+let JEV_CX = P_HOME_X, JEV_CY = 188;   // Boss 中心（layoutFighters 按立绘高度重算）
+let JEV_W = 158, JEV_H = 168;
 const HEART_SPD = 185.0;
 const PLAYER_MAXHP = 120.0;
 
@@ -326,6 +330,7 @@ function netMsg(topic, m){
     net.players.set(cid, {n:m.n||"???", s:m.s||"lobby", ts:Date.now()});
     if (net.partner && cid===net.partner){
       net.partnerName=m.n;
+      if (m.k!==undefined) net.pSkin=m.k|0;
       // bye 消息可能丢：对方的 presence 从 team/battle 变回 lobby 才算真退队。
       // （组队刚成立时收到的第一条可能还是他几秒前发的旧 lobby 包，不能当退队）
       if (m.s==="lobby"){
@@ -339,13 +344,14 @@ function netMsg(topic, m){
       if (!net.role && (!net.invite || Date.now()-net.invite.ts>6000))
         net.invite={from:m.from, n:m.n, ts:Date.now()};
       else if (net.role) netPub(NET_BASE+"/i/"+m.from, {t:"busy"});
-    } else if (m.t==="acc"){ netTeamForm(m.from, m.n); }
+    } else if (m.t==="acc"){ netTeamForm(m.from, m.n, m.k); }
     else if (m.t==="rej"){ if (net.invSent===m.from){ net.invSent=0; Say(m.n+" 拒绝了组队邀请"); } }
     else if (m.t==="busy"){ if (net.invSent===m.from){ net.invSent=0; Say(m.n+" 正在组队中"); } }
     else if (m.t==="ok"){                                // 队长确认 → 我是队员
       if (net.leftAt && Date.now()-net.leftAt<6000) return;  // 刚退出，忽略迟到的确认
       if (net.role==="member" && net.partner===m.leader) return;   // QoS 重发的重复包：别覆盖当前字幕/状态
-      net.role="member"; net.partner=m.leader; net.partnerName=m.n; net.lostSince=0; net.leftAt=0;
+      net.role="member"; net.partner=m.leader; net.partnerName=m.n;
+      net.pSkin=(m.k!==undefined)?(m.k|0):net.pSkin; net.lostSince=0; net.leftAt=0;
       net.teamTopic=NET_BASE+"/t/"+m.leader;
       net.invite=null; net.invSent=0; net.panel=false;
       net.pTs=0; net.bTs=0;
@@ -364,13 +370,14 @@ function netMsg(topic, m){
   if (net.teamTopic && topic===net.teamTopic){ netTeamMsg(m); }
 }
 // 队长收到同意 → 组队成立
-function netTeamForm(cid, name){
+function netTeamForm(cid, name, skin){
   if (net.role || (net.invSent && net.invSent!==cid)) return;
-  net.role="leader"; net.partner=cid; net.partnerName=name; net.lostSince=0; net.leftAt=0;
+  net.role="leader"; net.partner=cid; net.partnerName=name;
+  net.pSkin=(skin!==undefined)?(skin|0):net.pSkin; net.lostSince=0; net.leftAt=0;
   net.teamTopic=NET_BASE+"/t/"+net.cid;
   net.invSent=0; net.panel=false; net.pTs=0; net.bTs=0;
   net.cli.subscribe(net.teamTopic, ()=>{});
-  netPubRetry(NET_BASE+"/i/"+cid, {t:"ok", leader:net.cid, n:net.name}, 3);
+  netPubRetry(NET_BASE+"/i/"+cid, {t:"ok", leader:net.cid, n:net.name, k:g_profile.skin}, 3);
   Say("已与 "+name+" 组队！你是队长（红心），选择 Boss 后 TA 会一起挑战");
   setTimeout(()=>{ if (isLeader() && net.partner===cid) netRtcStart(); }, 900);   // 等对方订阅好再发 offer
 }
@@ -454,6 +461,7 @@ function netTeamMsg(m){
     const key=m.from+":"+m.turn+":"+m.kind;
     if (net.actSeen && net.actSeen===key) return;        // 重发包只算一次（否则队长会重复扣血）
     net.actSeen=key;
+    if (m.kind==="fight") startPAttack(1, (m.dmg|0)>0?"fight":"miss");  // 队友的出刀动作也要看得见
     if (isLeader() && m.kind==="fight" && m.dmg>0) HitJevil(m.dmg|0);   // 队长权威扣血
     net.pAct=true;
     // 已经出过刀在等队友 → 开打；已经阵亡（观战）且停在菜单里 → 也要继续推进，
@@ -559,7 +567,7 @@ function netDisband(sendBye){
   if (topic && net.cli) setTimeout(()=>{ try{ net.cli.unsubscribe(topic); }catch(e){} }, 700);
   const wasWaiting = (g_state===ST_WAIT);        // 正卡在「等队友出刀」→ 队伍没了就别干等
   netRtcClose();                                  // 关掉直连（bye 已经在上面发走了）
-  net.role=""; net.partner=""; net.partnerName=""; net.teamTopic="";
+  net.role=""; net.partner=""; net.partnerName=""; net.pSkin=undefined; net.teamTopic="";
   net.px=undefined; net.php=undefined; net.lostSince=0; net.pseen=0; net.pS="";
   net.myAct=false; net.pAct=false; net.pActPending=false; net.pDead=false;
   net.startNo=0;                                  // 开战序号：队长每开一场 +1，队员按序号去重（重发/重启都靠它）
@@ -587,13 +595,13 @@ function netRerollId(){                                  // 复制标签页导�
 function netSendInvite(cid){
   if (net.role){ Say("已经在队伍中了"); return; }
   net.invSent=cid;
-  netPub(NET_BASE+"/i/"+cid, {t:"inv", from:net.cid, n:net.name});
+  netPub(NET_BASE+"/i/"+cid, {t:"inv", from:net.cid, n:net.name, k:g_profile.skin});
   Say("已向 "+(net.players.get(cid)?.n||"对方")+" 发出组队邀请…");
 }
 function netAcceptInvite(){
   const iv=net.invite; if (!iv) return;
   net.invite=null;
-  netPub(NET_BASE+"/i/"+iv.from, {t:"acc", from:net.cid, n:net.name});
+  netPub(NET_BASE+"/i/"+iv.from, {t:"acc", from:net.cid, n:net.name, k:g_profile.skin});
   Say("已同意 "+iv.n+" 的组队邀请…");
 }
 function netDeclineInvite(){
@@ -606,7 +614,7 @@ function netLeave(){                                     // 队员/队长主动�
   const wasMember=isMember();
   net.leftAt=Date.now();
   netDisband(true);
-  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst});
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
   Say(wasMember ? "已退出组队" : "队伍已解散");
   if (wasMember && g_state>=ST_INTRO) GoTitle();
 }
@@ -629,7 +637,7 @@ function netTick(){
   if (nowMs-net.lastPre>2500){
     net.lastPre=nowMs;
     const s = net.role ? (g_state===ST_ATTACK?"battle":"team") : "lobby";
-    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs, i:net.inst});
+    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs, i:net.inst, k:g_profile.skin});
     for (const [cid,p] of net.players)                   // 清理过期玩家
       if (nowMs-p.ts>9000){
         net.players.delete(cid);
@@ -818,6 +826,8 @@ function ResetGame(){
   g_bullets=[]; g_dmg=[]; g_sparks=[];
   g_heartX=BOX_CX; g_heartY=BOX_CY; g_inv=0;
   g_jevOffX=0; g_jevOffY=0; g_tpTimer=0;
+  PATK[0]=null; PATK[1]=null;
+  layoutFighters();
   g_hitFlash=0; g_redFlash=0; g_lastPat=B.pat[0];
   g_whiteFlash=0.45;
   g_dead=false; g_deadChoice=false; g_deadSel=0;
@@ -1021,6 +1031,7 @@ function AfterAction(kind, dmg){               // 本回合自己的行动结束
 function Update(dt){
   if (g_hitStop>0){ g_hitStop-=dt; dt*=0.15; }
   g_animT += dt;
+  updatePAttack(dt);
   if (g_inv>0) g_inv-=dt;
   if (g_hitFlash>0) g_hitFlash-=dt;
   if (g_redFlash>0) g_redFlash-=dt;
@@ -1820,6 +1831,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
       g_pendingDmg=Math.floor(16+acc*acc*acc*58);
       g_barHit=true;
       g_actionKind="fight"; g_actionDmg=g_pendingDmg;
+      startPAttack(0, g_pendingDmg>0?"fight":"miss");     // 自己冲出去砍一刀
       DoAttack(g_pendingDmg);
       g_state=ST_DMG; g_stateT=0;
     }
@@ -2022,6 +2034,154 @@ function drawCharFrame(i, cx, cy, hgt, maxW){
   ctx.restore();
 }
 
+// ---------------- 场上的角色（左侧）与 Boss（右侧） ----------------
+const PATK = [null, null];                     // 两个槽位的出刀动画：{t,dur,kind}
+const PF_SOLO = { x:178, h:128 };              // 单人：一个人站中间偏左
+const PF_DUO  = [{ x:96, h:120 }, { x:252, h:100 }];    // 组队：0=自己（前）、1=队友（后）
+
+function partnerSkin(){
+  if (!net.role) return -1;
+  const k=net.pSkin;
+  if (k!==undefined && k>=0 && k<CHARS.length) return k;
+  return (Math.max(0,g_profile.skin)+1)%CHARS.length;   // 还没收到对方档案：先挑一个不同的
+}
+function mySkin(){
+  return (g_profile.skin>=0 && g_profile.skin<CHARS.length) ? g_profile.skin : 0;
+}
+function fighterList(){                        // 当前场上的人
+  if (!net.role) return [{ i:0, skin:mySkin(), x:PF_SOLO.x, h:PF_SOLO.h, dead:g_dead,
+                           name:g_profile.name||"" }];
+  return [
+    { i:0, skin:mySkin(),      x:PF_DUO[0].x, h:PF_DUO[0].h, dead:g_dead,
+      name:g_profile.name||"你" },
+    { i:1, skin:partnerSkin(), x:PF_DUO[1].x, h:PF_DUO[1].h, dead:net.pDead,
+      name:net.partnerName||"" },
+  ];
+}
+function layoutFighters(){                     // Boss 立绘按「脚踩地面线」重算，太高就缩放
+  let bw=158, bh=168;
+  if (g_boss===1){ bw=220; bh=340; }
+  else if (g_boss===2){ bw=236; bh=336; }
+  else if (g_boss===3){ bw=210; bh=215; }
+  const k=Math.min(1, (GROUND_Y-14)/bh);
+  JEV_W=bw*k; JEV_H=bh*k;
+  JEV_CX=P_HOME_X; JEV_CY=GROUND_Y - JEV_H/2;
+}
+function startPAttack(who, kind){
+  if (who===1 && !net.role) return;
+  const f=fighterList().find(x=>x.i===who);
+  if (f && f.dead) return;
+  PATK[who]={ t:0, dur: kind==="fight"?0.50:0.42, kind:kind||"fight" };
+}
+function updatePAttack(dt){
+  for (let i=0;i<2;i++){
+    const a=PATK[i];
+    if (!a) continue;
+    a.t+=dt;
+    if (a.t>=a.dur) PATK[i]=null;
+  }
+}
+function pAtkOffset(a, dash){                  // 冲出去 → 停顿 → 收回
+  if (!a) return 0;
+  const p=clamp(a.t/a.dur,0,1);
+  if (p<0.30){ const q=p/0.30; return dash*(1-Math.pow(1-q,3)); }
+  if (p<0.56) return dash;
+  const q=(p-0.56)/0.44; return dash*(1-q*q);
+}
+function drawFighters(){
+  // 结算画面（GAME OVER / 胜利）有整屏覆盖文字，角色画上去只会变成残影
+  if (g_state===ST_LOSE || g_state===ST_WIN) return;
+  const list=fighterList().slice().sort((a,b)=>a.h-b.h);   // 小的（远的）先画
+  // 开场：角色从左侧走进来
+  let inK=1;
+  if (g_state===ST_INTRO) inK=Math.min(1, g_stateT/0.75);
+  for (const f of list){
+    const c=CHARS[f.skin]||CHARS[0], im=IMG[c.img];
+    if (!im || !im.naturalWidth) continue;
+    const n=c.frames, fw=im.naturalWidth/n, fh=im.naturalHeight;
+    const sc=f.h/fh, w=fw*sc, hh=fh*sc;
+    const a=PATK[f.i];
+    const dash=f.i===0 ? (net.role?74:120) : 96;
+    const off=pAtkOffset(a, dash);
+    const p=a ? clamp(a.t/a.dur,0,1) : -1;
+    const bob=Math.sin(g_animT*3+f.i*1.7)*2.0;
+    let rot=0;
+    if (p>=0.30 && p<0.56) rot=-0.16;
+    else if (p>=0.56) rot=-0.16*(1-(p-0.56)/0.44);
+    const fr=Math.floor(g_animT*(a?14:7)+f.i*3)%n;
+    // 影子
+    ctx.save();
+    ctx.fillStyle="rgba(8,4,16,0.34)";
+    ctx.beginPath(); ctx.ellipse(f.x+off*0.6, GROUND_Y+2, w*0.40, 5.5, 0, 0, 6.29); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.imageSmoothingEnabled=false;
+    if (inK<1) ctx.globalAlpha=inK;
+    if (f.dead){
+      ctx.globalAlpha=0.70;
+      ctx.translate(f.x, GROUND_Y-w*0.42);
+      ctx.rotate(1.50);                        // 倒地：身体平躺在地面线上
+    } else {
+      ctx.translate(f.x+off-(1-inK)*70, GROUND_Y+bob);
+      if (rot) ctx.rotate(rot);
+    }
+    ctx.drawImage(im, fr*fw, 0, fw, fh, -w/2, -hh, w, hh);
+    ctx.restore();
+    // 名字（让人一眼看出哪个是自己/队友）
+    if (f.name && !f.dead && !a){
+      outlineText(f.name, 0, GROUND_Y-hh-15, 13, f.i===0?"#ffc9d2":"#a9d8ff",
+                  f.x+off-(1-inK)*70, false);
+    }
+  }
+}
+// 刀光：出刀瞬间在 Boss 身上扫过，再补一道从角色拉过去的残影
+function drawFightFx(){
+  for (const f of fighterList()){
+    const a=PATK[f.i];
+    if (!a || f.dead || a.kind!=="fight") continue;
+    const p=clamp(a.t/a.dur,0,1);
+    if (p<0.26 || p>0.70) continue;
+    const q=(p-0.26)/0.44, al=Math.sin(q*Math.PI);
+    const bx=JEV_CX-JEV_W*0.06, by=JEV_CY-JEV_H*0.02;
+    const R=Math.max(44, Math.min(JEV_W,JEV_H)*0.30);
+    const sx=f.x+(f.i===0?(net.role?74:120):96)*0.5, sy=GROUND_Y-58;
+    ctx.save();
+    // 冲刺残影
+    ctx.fillStyle=`rgba(255,255,255,${0.14*al})`;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy-14); ctx.lineTo(bx, by-6);
+    ctx.lineTo(bx, by+6);  ctx.lineTo(sx, sy+14);
+    ctx.closePath(); ctx.fill();
+    ctx.translate(bx,by);
+    ctx.rotate(-0.85+q*0.34);
+    // 一道斜劈的月牙：弧带中点正好穿过 Boss 身体中心
+    const th=18*(0.62+0.5*al), a0=-1.0, a1=1.0, cx2=-R+th*0.5, N=16;
+    // 两端收尖的月牙：中间最厚，两头点状收尾
+    ctx.beginPath();
+    for (let i=0;i<=N;i++){
+      const t=i/N, ang=a0+(a1-a0)*t;
+      const x=cx2+Math.cos(ang)*R, y=Math.sin(ang)*R;
+      if (i) ctx.lineTo(x,y); else ctx.moveTo(x,y);
+    }
+    for (let i=N;i>=0;i--){
+      const t=i/N, ang=a0+(a1-a0)*t;
+      const rr=R-th*Math.pow(Math.sin(Math.PI*t),0.55);
+      ctx.lineTo(cx2+Math.cos(ang)*rr, Math.sin(ang)*rr);
+    }
+    ctx.closePath();
+    ctx.fillStyle=`rgba(255,255,255,${Math.min(1,1.25*al)})`;
+    ctx.fill();
+    ctx.strokeStyle=`rgba(255,236,158,${0.85*al})`;
+    ctx.lineWidth=1.6; ctx.stroke();
+    // 亮芯
+    ctx.beginPath();
+    ctx.arc(cx2,0,R-th*0.46,a0+0.16,a1-0.16,false);
+    ctx.strokeStyle=`rgba(255,255,255,${Math.min(1,1.4*al)})`;
+    ctx.lineWidth=2.6; ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawAvatar(){
   if (!AVATAR.on || g_state===ST_CREATE) return;
   const p=AVATAR.pad, x=AVATAR.x-p, y=AVATAR.y-p;
@@ -2069,7 +2229,7 @@ function createChooseSkin(){
   saveProfile();
   net.name = g_profile.name;                   // 组队邀请里显示的就是这个名字
   try { localStorage.setItem("sj_name", net.name); } catch(e){}
-  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst});
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
   avatarLayout();
   playSfx("snd_menu_select");
   GoTitle();
@@ -2279,25 +2439,27 @@ function Render(){
   if (g_jevShake>0){ sx=rnd(-6,6); sy=rnd(-4,4); }
   sx+=shx; sy+=shy;
 
-  // ---- boss 立绘
+  // ---- 我方角色（左侧）
+  drawFighters();
+
+  // ---- boss 立绘（右侧，脚踩同一条地面线）
+  const bk = JEV_H / (g_boss===1?340 : g_boss===2?336 : g_boss===3?215 : 168);
   let jx = JEV_CX + g_jevOffX*(g_state===ST_ATTACK?1:0);
   let jy = JEV_CY + g_jevOffY*(g_state===ST_ATTACK?1:0) + bob + sy;
   if (g_state===ST_INTRO)
-    jy = -180 + (JEV_CY+bob)*Math.min(1, g_stateT/1.1);
+    jy = -200 + (JEV_CY+bob)*Math.min(1, g_stateT/1.1);
+  let jw=JEV_W, jh=JEV_H;
   if (g_state!==ST_LOSE){
-    let jf=null, jw=158, jh=168;
+    let jf=null;
     if (g_boss===0){
       if (g_state===ST_WIN){ jf=img("jevil_spared")||img("jevil"); const sc=1+Math.sin(g_animT*2)*0.03; jw*=sc; jh*=sc; }
       else if (g_hitFlash>0 && frameCount("jevil_hurt_",8)>0){
-        jf=IMG["jevil_hurt_"+(Math.floor(g_animT*24)%8)]; jw=200; jh=130;
+        jf=IMG["jevil_hurt_"+(Math.floor(g_animT*24)%8)]; jw=200*bk; jh=130*bk;
       }
       else if (g_jevHp<Boss().maxhp*0.25 && img("jevil_tired")) jf=img("jevil_tired");
       else { const n=jevilJumpN(); jf = n>0?IMG["jevil_jump_"+(Math.floor(g_animT*9)%n)]:img("jevil"); }
     } else {
       jf = BossFrame(g_boss, g_hitFlash>0);
-      if (g_boss===1){ jw=220; jh=340; }
-      else if (g_boss===2){ jw=236; jh=336; }
-      else { jw=210; jh=215; }
       if (g_jevHp<Boss().maxhp*0.25){ jx+=rnd(-3,3); jy+=rnd(-3,3); }
       if (g_hitFlash>0){ jx+=rnd(-5,5); }
     }
@@ -2307,10 +2469,12 @@ function Render(){
       ctx.restore();
     }
   }
+  // 刀光画在 Boss 之上
+  drawFightFx();
   // 命中白闪
   if (g_hitFlash>0){
-    ctx.fillStyle = `rgba(255,255,255,${Math.min(1,g_hitFlash*2)})`;
-    ctx.beginPath(); ctx.ellipse(jx-85+sx, jy-95+190/2, 85, 95, 0, 0, 6.29); ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(0.34,g_hitFlash*1.1)})`;
+    ctx.beginPath(); ctx.ellipse(jx+sx, jy, JEV_W*0.34, JEV_H*0.36, 0, 0, 6.29); ctx.fill();
   }
   // boss 血条
   if (g_jevHpShown && g_state!==ST_WIN && g_state!==ST_LOSE){
@@ -2565,19 +2729,28 @@ function Render(){
 
   renderNetHUD(UI_BOT);   // 联机 HUD：右下角在线人数/队伍/邀请
 
-  // ---- FIGHT 时机条（覆盖在战斗框上，跟随场景偏移）
+  // ---- FIGHT 时机条：直接扫在空着的战斗框里（不再盖住场上的角色和 Boss）
   if (g_state===ST_FIGHT || (g_state===ST_DMG && g_stateT<0.4)){
     ctx.save(); ctx.translate(VOX,VOY);
-    ctx.fillStyle="rgba(10,6,18,0.78)"; ctx.fillRect(250,60,142,190);
-    ctx.strokeStyle="#fffafa"; ctx.lineWidth=3; ctx.strokeRect(250,60,142,190);
+    const y0=BOX_Y0+12, y1=BOX_Y1-12, hh=y1-y0;
+    ctx.fillStyle="rgba(255,240,200,0.05)"; ctx.fillRect(250,y0,142,hh);
+    ctx.strokeStyle="rgba(255,250,250,0.75)"; ctx.lineWidth=2;
+    ctx.strokeRect(250,y0,142,hh);
+    // 完美时机：中间那道竖线
     ctx.strokeStyle="#ffdc5a"; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.moveTo(321,60); ctx.lineTo(321,250); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(321,y0); ctx.lineTo(321,y1); ctx.stroke();
+    ctx.fillStyle="#ffdc5a";
+    ctx.beginPath(); ctx.moveTo(321,y0-6); ctx.lineTo(315,y0-16); ctx.lineTo(327,y0-16); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(321,y1+6); ctx.lineTo(315,y1+16); ctx.lineTo(327,y1+16); ctx.closePath(); ctx.fill();
+    // 扫动的红条
     if (!g_barHit || g_stateT<0.35){
-      ctx.fillStyle="#ff3c3c";
-      ctx.fillRect(g_barX-3, 60, 6, 190);
+      ctx.fillStyle="rgba(255,60,60,0.30)"; ctx.fillRect(g_barX-9, y0, 18, hh);
+      ctx.fillStyle="#ff3c3c"; ctx.fillRect(g_barX-3, y0-4, 6, hh+8);
     }
     ctx.restore();
-    outlineText(isTouch?"按 A 出刀！":"按 Z 出刀！", 0, 256+VOY, 15, "#fff", WINW/2, false);
+    ctx.save(); ctx.translate(VOX,VOY);
+    outlineText(isTouch?"按 A 出刀！":"按 Z 出刀！", BOX_X0+16, BOX_CY-9, 17, "#fff", -1);
+    ctx.restore();
   }
 
   // ---- 子菜单（画在战斗框上，跟随场景偏移）
