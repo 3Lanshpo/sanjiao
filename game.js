@@ -16,7 +16,8 @@ const PLAYER_MAXHP = 120.0;
 // 状态
 const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_FIGHT=5, ST_DMG=6, ST_DIALOG=7, ST_ATTACK=8, ST_WIN=9, ST_LOSE=10,
-      ST_WAIT=11;                     // 联机：我已出刀，等队友出刀
+      ST_WAIT=11,                     // 联机：我已出刀，等队友出刀
+      ST_CREATE=12;                   // 首次进入：起名 + 选外貌
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
 
 // 招式
@@ -105,6 +106,35 @@ let g_pauseUI=false;                           // 联机暂停：只开面板，
 let g_sliceCv=null, g_sliceCtx=null;           // 切屏后处理用的临时画布
 let g_hbMs=45;                                 // 弹幕阶段传心位置的间隔（公共 broker 高频会丢包，实测调）
 
+// ---------------- 存档：玩家档案（名字 + 外貌） ----------------
+// 存在 localStorage 里，下次进来直接进标题，不再问名字。
+const SAVE_KEY = "sanjiao_profile_v1";
+const CHARS = [
+  { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6 },   // 原版待机动画 6 帧
+  { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4 },   // 4 帧
+  { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5 },   // 5 帧
+];
+let g_profile = { name:"", skin:-1 };
+let g_createStage = 0;        // 0 = 起名，1 = 选外貌
+let g_createSel = 0;          // 外貌光标
+let g_nameBlink = 0;
+
+function loadProfile(){
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const p = JSON.parse(raw);
+    if (!p || typeof p.name !== "string" || !p.name.trim()) return false;
+    const skin = p.skin|0;
+    if (!(skin>=0 && skin<CHARS.length)) return false;
+    g_profile = { name: p.name.trim().slice(0,12), skin };
+    return true;
+  } catch(e){ return false; }
+}
+function saveProfile(){
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(g_profile)); } catch(e){}
+}
+
 // ---------------- 联机（MQTT 公共 broker，免注册） ----------------
 const NET_BASE = "sanjiao-boss-v1";
 // 公共 broker：hivemq 实测最稳（RTT 220ms 上下、抖动极小）。两端必须连同一个，
@@ -145,8 +175,10 @@ try {
   }
   net.cid = cid;
   net.inst = Math.random().toString(36).slice(2,8);   // 本次加载的实例号，用于识别「复制标签页」撞号
-  net.name = localStorage.getItem("sj_name") ||
-    ("玩家-"+Math.random().toString(36).slice(2,5).toUpperCase());
+  net.name = (loadProfile() && g_profile.name)
+    ? g_profile.name                                  // 存档里的名字：组队邀请就显示这个
+    : (localStorage.getItem("sj_name") ||
+       ("玩家-"+Math.random().toString(36).slice(2,5).toUpperCase()));
   localStorage.setItem("sj_name", net.name);
 } catch(e){ net.cid="sj"+Math.random().toString(36).slice(2,10); net.name="玩家-?"; }
 
@@ -713,6 +745,7 @@ const IMG_LIST = ["bg","jevil","soul","spade","diamond","club","knife","boom","s
 for (let i=0;i<8;i++){ IMG_LIST.push("jevil_jump_"+i); IMG_LIST.push("jevil_hurt_"+i); }
 for (let i=0;i<8;i++){ IMG_LIST.push("tenna_"+i); IMG_LIST.push("neo_"+i); IMG_LIST.push("pink_"+i); }
 for (let i=0;i<4;i++){ IMG_LIST.push("spamton_"+i); }
+for (const c of CHARS) IMG_LIST.push(c.img);        // 三名可选角色的待机动画条
 
 const SFX = {};
 const SFX_LIST = ["snd_menu_move","snd_menu_select","snd_slash"];
@@ -1582,6 +1615,7 @@ function hot(x,y,w,h,fn){ hotspots.push({x,y,w,h,fn}); }
 // ---- 触屏常驻按键：上 / 左 / 右 / 下 + A(确定) / B(返回) ----
 let SAFE_B = 0;                                  // 底部安全区（手机手势条）
 let VSC = 1;                                     // 1 CSS 像素 = 多少舞台逻辑像素（fitCanvas 里算）
+const AVATAR = { on:false, x:0, y:0, w:0, h:0 };  // 右上角常驻角色头像
 const PAD = { on:false, k:46, up:null, down:null, left:null, right:null, a:null, b:null };
 const VDIR = { up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight" };
 const vptr = new Map();                          // pointerId → 按键 id（多指各管各的）
@@ -1658,6 +1692,20 @@ function deadQuit(){                    // 阵亡后：退出战斗 / 退出队�
 function deadSpectate(){ g_deadChoice=true; Say("观战中……按暂停键可退出"); }
 
 function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
+  // ---- 首次进入：起名 / 选外貌
+  if (g_state===ST_CREATE){
+    if (g_createStage===0){
+      if (vk==="z"||vk==="Enter") createConfirmName();
+      // 已经有存档的人从标题点进来，B 可以放弃返回
+      if ((vk==="x"||vk==="Escape") && g_profile.skin>=0) GoTitle();
+      return;
+    }
+    if (vk==="ArrowLeft"){ g_createSel=(g_createSel+2)%CHARS.length; playSfx("snd_menu_move"); }
+    if (vk==="ArrowRight"){ g_createSel=(g_createSel+1)%CHARS.length; playSfx("snd_menu_move"); }
+    if (vk==="z"||vk==="Enter") createChooseSkin();
+    if (vk==="x"||vk==="Escape"){ g_createStage=0; if (nameIn) nameIn.focus(); }
+    return;
+  }
   // ---- 联机暂停面板（最高优先级，不冻结游戏）
   if (g_pauseUI){
     if (vk==="ArrowUp"){ g_pauseSel=(g_pauseSel+2)%3; playSfx("snd_menu_move"); }
@@ -1784,6 +1832,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
 }
 
 window.addEventListener("keydown", e=>{
+  if (document.activeElement === nameIn) return;    // 正在起名：键盘全给输入框
   if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Tab"].includes(e.key)) e.preventDefault();
   if (!e.repeat) pressKey(e.key.length===1 ? e.key.toLowerCase() : e.key);
   keys.add(e.key);
@@ -1885,6 +1934,7 @@ function fitCanvas(){
     SAFE_B = parseFloat(pp) || 0;
   } catch(e){ SAFE_B = 0; }
   vpadLayout();                              // 虚拟按键跟着屏幕尺寸重排
+  avatarLayout();                            // 右上角头像也跟着重排
 }
 window.addEventListener("resize", fitCanvas);
 window.addEventListener("orientationchange", ()=>{ setTimeout(fitCanvas,120); });
@@ -1937,6 +1987,154 @@ function GetCrt(){
   return crtCanvas;
 }
 
+// ---------------- 档案：右上角常驻头像 ----------------
+function avatarLayout(){                       // 屏幕/角色变了就重排（尺寸按 CSS 像素定）
+  AVATAR.on = (g_profile.skin>=0 && g_profile.skin<CHARS.length);
+  if (!AVATAR.on) return;
+  const ww = document.documentElement.clientWidth  || WINW;
+  const wh = document.documentElement.clientHeight || WINH;
+  const c  = CHARS[g_profile.skin];
+  const im = IMG[c.img];
+  const fw = (im && im.naturalWidth)  ? im.naturalWidth/c.frames : 72;
+  const fh = (im && im.naturalHeight) ? im.naturalHeight         : 78;
+  const h  = clamp(Math.min(ww,wh)*0.17, 50, 84) * VSC;
+  const pad = 7*VSC;
+  AVATAR.h = h;
+  AVATAR.w = fw/fh*h;
+  AVATAR.pad = pad;
+  AVATAR.x = WINW - 8*VSC - pad - AVATAR.w;
+  AVATAR.y = 8*VSC + pad;
+}
+
+// 画一帧待机动画；hgt=显示高度，maxW 给个上限免得宽角色（Susie 带斧头）撑破卡片
+function drawCharFrame(i, cx, cy, hgt, maxW){
+  const c  = CHARS[i] || CHARS[0];
+  const im = IMG[c.img];
+  if (!im || !im.naturalWidth) return;
+  const n=c.frames, fw=im.naturalWidth/n, fh=im.naturalHeight;
+  const f=Math.floor(g_animT*7)%n;
+  let sc=hgt/fh;
+  if (maxW && fw*sc>maxW) sc=maxW/fw;
+  const w=fw*sc, hh=fh*sc;
+  ctx.save(); ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(im, f*fw, 0, fw, fh, cx-w/2, cy-hh/2, w, hh);
+  ctx.restore();
+}
+
+function drawAvatar(){
+  if (!AVATAR.on || g_state===ST_CREATE) return;
+  const p=AVATAR.pad, x=AVATAR.x-p, y=AVATAR.y-p;
+  const w=AVATAR.w+p*2, h=AVATAR.h+p*2;
+  ctx.save();
+  roundRect(x,y,w,h,9);
+  ctx.fillStyle="rgba(10,8,20,0.34)"; ctx.fill();
+  ctx.strokeStyle=g_state===ST_TITLE ? "rgba(255,232,120,0.55)" : "rgba(190,206,255,0.30)";
+  ctx.lineWidth=1.6; ctx.stroke();
+  ctx.restore();
+  drawCharFrame(g_profile.skin, AVATAR.x+AVATAR.w/2, AVATAR.y+AVATAR.h/2, AVATAR.h);
+  if (g_state===ST_TITLE) hot(x-6, y-6, w+12, h+12, openCreate);   // 标题界面点头像 = 重新起名/换外貌
+}
+
+// ---------------- 首次进入：起名 + 选外貌 ----------------
+const nameIn = document.getElementById("nameIn");
+if (nameIn){
+  nameIn.addEventListener("input", ()=>{ g_profile.name = nameIn.value.slice(0,12); });
+  nameIn.addEventListener("keydown", e=>{
+    e.stopPropagation();                      // 打字别触发游戏按键
+    if (e.key==="Enter"){ e.preventDefault(); createConfirmName(); }
+    else if (e.key==="Escape"){ e.preventDefault(); nameIn.blur(); }
+  });
+}
+
+function openCreate(){
+  g_state=ST_CREATE; g_stateT=0; g_createStage=0;
+  g_createSel = (g_profile.skin>=0 ? g_profile.skin : 0);
+  if (nameIn) nameIn.value = g_profile.name || "";
+  Say(""); BgmStop(); crtDirty = true;
+  if (!isTouch && nameIn) setTimeout(()=>{ try{ nameIn.focus(); }catch(e){} }, 60);   // 桌面直接可打字
+}
+function createConfirmName(){
+  let n = (nameIn ? nameIn.value : g_profile.name) || "";
+  n = n.replace(/\s+/g," ").trim().slice(0,12);
+  if (!n) n = "KRIS";                          // 什么都不填也能过
+  g_profile.name = n;
+  if (nameIn){ nameIn.value = n; nameIn.blur(); }
+  g_createStage = 1;
+  g_createSel = (g_profile.skin>=0 ? g_profile.skin : 0);
+  playSfx("snd_menu_select");
+}
+function createChooseSkin(){
+  g_profile.skin = g_createSel;
+  saveProfile();
+  net.name = g_profile.name;                   // 组队邀请里显示的就是这个名字
+  try { localStorage.setItem("sj_name", net.name); } catch(e){}
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst});
+  avatarLayout();
+  playSfx("snd_menu_select");
+  GoTitle();
+}
+// 把隐藏输入框摆到画布上的名字框位置：手机点它就会弹系统键盘
+function syncNameInput(bx,by,bw,bh){
+  if (!nameIn) return;
+  const on = (g_state===ST_CREATE && g_createStage===0);
+  nameIn.style.pointerEvents = on ? "auto" : "none";
+  if (!on){ if (document.activeElement===nameIn) nameIn.blur(); return; }
+  const r = cv.getBoundingClientRect();
+  const sx = r.width/WINW, sy = r.height/WINH;
+  nameIn.style.left   = (r.left + bx*sx) + "px";
+  nameIn.style.top    = (r.top  + by*sy) + "px";
+  nameIn.style.width  = (bw*sx) + "px";
+  nameIn.style.height = (bh*sy) + "px";
+}
+
+function RenderCreate(){
+  const bg0 = img("bg");
+  if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
+  else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
+  const cx = WINW/2;
+  const raw = (nameIn ? nameIn.value : g_profile.name) || "";
+  const shown = raw.replace(/\s+/g," ");
+
+  if (g_createStage===0){
+    outlineText("新 的 旅 途", 0, 40+VOY, 17, "#9fb4e8", cx, false);
+    outlineText("你 叫 什 么 名 字 ？", 0, 78+VOY, 40, "#ffec78", cx);
+    const bw = Math.min(470, WINW-70), bh = 78, bx = cx-bw/2, by = 168+VOY;
+    ctx.fillStyle="rgba(12,10,24,0.85)"; ctx.fillRect(bx,by,bw,bh);
+    ctx.strokeStyle="#8fb6ff"; ctx.lineWidth=2.5; ctx.strokeRect(bx,by,bw,bh);
+    syncNameInput(bx,by,bw,bh);
+    if (shown){
+      ctx.save();
+      ctx.font = `bold 30px "Microsoft YaHei","PingFang SC",sans-serif`;
+      ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillStyle="#fff"; ctx.fillText(shown, cx, by+bh/2);
+      const tw = ctx.measureText(shown).width;
+      ctx.restore();
+      if (document.activeElement===nameIn && (Math.floor(performance.now()/500)%2===0))
+        ctx.fillRect(cx+tw/2+4, by+bh/2-17, 3, 34);
+    } else {
+      outlineText(isTouch?"点 这 里 输 入 名 字":"点框里输入名字 或直接打字", 0, by+bh/2-12, 22, "rgba(180,196,230,0.5)", cx, false);
+    }
+    outlineText(isTouch?"输入完按 A 确定":"输入后按 Z / Enter 确定", 0, 268+VOY, 15, "#b4d2ff", cx, false);
+    outlineText("名字随便起，组队时队友看到的就是它", 0, 294+VOY, 13, "#8ea2d8", cx, false);
+  } else {
+    outlineText("选 一 个 样 子", 0, 38+VOY, 34, "#ffec78", cx);
+    outlineText("名字："+(shown||"KRIS"), 0, 86+VOY, 16, "#c8dcff", cx, false);
+    const cw=152, chh=212, gap=34, x0=cx-(cw*3+gap*2)/2, y0=120+VOY;
+    for (let i=0;i<3;i++){
+      const x=x0+i*(cw+gap), y=y0, sel=(i===g_createSel);
+      ctx.fillStyle = sel ? "rgba(52,30,62,0.95)" : "rgba(20,16,34,0.82)";
+      ctx.fillRect(x,y,cw,chh);
+      ctx.strokeStyle = sel ? "#ffe878" : "rgba(130,130,160,0.55)";
+      ctx.lineWidth = sel?3:1.5; ctx.strokeRect(x,y,cw,chh);
+      drawCharFrame(i, x+cw/2, y+92+(sel?Math.sin(g_animT*4)*3:0), 104, cw-20);
+      outlineText(CHARS[i].label, 0, y+168, 20, sel?"#fff08c":"#d6d2dc", x+cw/2);
+      hot(x,y,cw,chh, ()=>{ g_createSel=i; playSfx("snd_menu_move"); });
+    }
+    outlineText(isTouch?"← → 选择　A 确定　B 改名":"← → 选择　Z 确定　X 改名", 0, 352+VOY, 15, "#d2dce1", cx, false);
+  }
+  outlineText(isTouch?"A 确定":"Z 确定", 0, WINH-26, 12, "rgba(140,160,210,0.65)", cx, false);
+}
+
 // ---- 主界面
 function RenderTitle(){
   ctx.fillStyle = "rgb(12,8,22)";
@@ -1979,7 +2177,7 @@ function RenderTitle(){
     let star=""; for (let s=0;s<=i;++s) star+="★";
     outlineText(star, 0, y+192, 15, "#ff7896", x+w/2, false);
   }
-  outlineText(isTouch?"方向键选择　A 开战":"← → 选择　Z 开战", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
+  outlineText(isTouch?"方向键选择　A 开战　·　点右上角头像可改名":"← → 选择　Z 开战　·　点右上角头像可改名", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
   // 联机信息
   if (net.role){
     outlineText(isLeader() ? "已组队：与 "+net.partnerName+"（TA 将与你一起挑战）"
@@ -2048,12 +2246,14 @@ function Render(){
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
-  if (g_state===ST_TITLE){ RenderTitle(); drawVPad(); return; }
+  if (g_state===ST_CREATE){ RenderCreate(); drawVPad(); return; }
+  if (g_state===ST_TITLE){ RenderTitle(); drawAvatar(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
     const bg0 = img("bg");
     if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
     ctx.drawImage(GetCrt(), 0, 0, WINW, WINH);
     RenderPause();
+    drawAvatar();
     drawVPad();
     return;
   }
@@ -2499,6 +2699,9 @@ function Render(){
   if (g_state===ST_MENU && !isTouch)
     outlineText("方向键选择  Z确认  X取消", 12, 10, 15, "#b4d2ff", -1, false);
 
+  // ---- 右上角自己的角色（存档选的外貌，一直显示）
+  drawAvatar();
+
   // ---- 触屏常驻按键（画在最上层，盖住面板也能操作）
   drawVPad();
 }
@@ -2573,7 +2776,8 @@ function RenderPauseUI(){
 }
 
 function btnPause(){
-  const x=WINW-44, y=10, w=34, h=30;
+  // 右上角让给角色头像，暂停键整体左移
+  const x=WINW-(AVATAR.on ? AVATAR.w + AVATAR.pad*2 + 8*VSC : 0)-44, y=10, w=34, h=30;
   ctx.fillStyle="rgba(20,14,40,0.6)";
   ctx.strokeStyle="rgba(200,200,255,0.5)"; ctx.lineWidth=1.5;
   roundRect(x,y,w,h,7); ctx.fill(); ctx.stroke();
@@ -2694,7 +2898,9 @@ function renderNetHUD(uiBot){
   const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#8a8a9a";
   let hy, panelTop;
   if (isTouch){
-    hy = (g_state>=ST_INTRO && g_state!==ST_TITLE) ? 46 : 6;
+    // 右上角被角色头像占了 → 在线/队伍信息排在头像下面（标题界面还要给「改名」让一行）
+    hy = AVATAR.on ? (AVATAR.y + AVATAR.h + AVATAR.pad + 5*VSC)
+                   : ((g_state>=ST_INTRO && g_state!==ST_TITLE) ? 46 : 6);
     rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 14, st);
     if (net.role){
       const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
@@ -2957,10 +3163,12 @@ function loop(now){
 // 联机心跳不能跟着停（否则另一个窗口会看不到你这个玩家）
 setInterval(()=>{ try{ netTick(); }catch(e){} }, 250);
 
-// 资源加载完成 → 进入主界面
+// 资源加载完成 → 有存档直接进主界面，没有就先起名选外貌
 loadFinishCb = ()=>{
   document.getElementById("loading").style.display="none";
-  GoTitle();
+  avatarLayout();
+  if (g_profile.skin>=0 && g_profile.name) GoTitle();     // 老玩家
+  else openCreate();                                      // 第一次进来
   playVoice("Jevil_voiceclip_CHAOS.wav");
   requestAnimationFrame(t=>{ lastT=t; loop(t); });
 };
