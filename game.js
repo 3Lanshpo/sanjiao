@@ -21,7 +21,8 @@ const PLAYER_MAXHP = 120.0;
 const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_FIGHT=5, ST_DMG=6, ST_DIALOG=7, ST_ATTACK=8, ST_WIN=9, ST_LOSE=10,
       ST_WAIT=11,                     // 联机：我已出刀，等队友出刀
-      ST_CREATE=12;                   // 首次进入：起名 + 选外貌
+      ST_CREATE=12,                   // 首次进入：起名 + 设密码 + 选外貌
+      ST_LOGIN=13;                    // 登录：用户名 + 密码 → 回到对应存档
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
 
 // 招式
@@ -139,12 +140,59 @@ const ITEMS = [
 ];
 const ItemByKey = k => ITEMS.find(i=>i.key===k);
 
-let g_profile = { name:"", skin:-1, cleared:[false,false,false,false] };
-let g_createStage = 0;        // 0 = 起名，1 = 选外貌
+let g_profile = { name:"", skin:-1, cleared:[false,false,false,false], pwd:"" };
+let g_accountKey = "";        // 当前账号在账号表里的键（= 玩家名）
+let g_createStage = 0;        // 0 = 起名，1 = 设密码，2 = 选外貌
 let g_createSel = 0;          // 外貌光标
+let g_createPwd = "";         // 新建存档时输入的密码（明文，仅用于本轮）
+let g_createName = "";        // 起名页里正在输入的名字（确认前不写进档案）
+let g_createNew = true;       // true = 新建存档（要设密码），false = 标题点头像改名
+let g_createErr = "";
+let g_backup = null;          // 从登录页点「新建存档」前的账号快照，B 可以反悔退回去
 let g_nameBlink = 0;
+// 登录页状态
+let g_login = { user:"", pwd:"", sel:0, err:"", lock:false };
 
-function loadProfile(){
+// ---------------- 账号（一个浏览器可存多份存档） ----------------
+// 新存档 = 名字 + 密码 + 外貌 + 通关记录；进去要登录。
+// 老版本的存档没有密码，自动迁移成「无密码账号」，启动时直接进（不弹登录）。
+const ACC_KEY = "sanjiao_accounts_v1";
+const CUR_KEY = "sanjiao_current_v1";
+
+function hashPwd(s){                        // 本地存档用，不追求密码学强度，只为不存明文
+  let h = 2166136261; s = "sj$" + (s||"");
+  for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h>>>0).toString(36);
+}
+function loadAccounts(){
+  try {
+    const raw = localStorage.getItem(ACC_KEY);
+    const o = raw ? JSON.parse(raw) : null;
+    return (o && typeof o==="object") ? o : {};
+  } catch(e){ return {}; }
+}
+function saveAccounts(o){ try { localStorage.setItem(ACC_KEY, JSON.stringify(o)); } catch(e){} }
+function currentUserName(){ try { return localStorage.getItem(CUR_KEY) || ""; } catch(e){ return ""; } }
+function setCurrentUser(u){ try { localStorage.setItem(CUR_KEY, u||""); } catch(e){} }
+function accountToProfile(a){
+  const cl = Array.isArray(a.cleared) ? a.cleared : [];
+  return { name: a.name||"", skin: (a.skin|0), pwd: a.pwd||"",
+           cleared: [0,1,2,3].map(i=>!!cl[i]) };
+}
+function currentAccount(){                   // 当前登录的账号（没登录/没存档 → null）
+  const u = currentUserName();
+  const a = loadAccounts();
+  return (u && a[u]) ? { user:u, acc:a[u] } : null;
+}
+function loadProfile(){                      // 启动时把当前账号载进 g_profile（含旧存档迁移）
+  const accounts = loadAccounts();
+  const cur = currentUserName();
+  if (cur && accounts[cur]){
+    g_accountKey = cur;
+    g_profile = accountToProfile(accounts[cur]);
+    return true;
+  }
+  // 旧存档迁移：老版本只存了一份 profile，没有账号表、没有密码
   try {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return false;
@@ -153,13 +201,41 @@ function loadProfile(){
     const skin = p.skin|0;
     if (!(skin>=0 && skin<CHARS.length)) return false;
     const cl = Array.isArray(p.cleared) ? p.cleared : [];
-    g_profile = { name: p.name.trim().slice(0,12), skin,
+    const acc = { name: p.name.trim().slice(0,12), skin, pwd:"",
                   cleared: [0,1,2,3].map(i=>!!cl[i]) };
+    accounts[acc.name] = acc;
+    saveAccounts(accounts);
+    setCurrentUser(acc.name);
+    g_accountKey = acc.name;
+    g_profile = accountToProfile(acc);
     return true;
   } catch(e){ return false; }
 }
-function saveProfile(){
+function saveProfile(){                      // 写回当前账号（同时保留旧 key，兼容老页面）
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(g_profile));
+    const u = g_accountKey || g_profile.name;
+    if (!u) return;
+    const accounts = loadAccounts();
+    accounts[u] = { name: g_profile.name, skin: g_profile.skin,
+                    cleared: (g_profile.cleared||[false,false,false,false]).slice(0,4),
+                    pwd: g_profile.pwd || (accounts[u] && accounts[u].pwd) || "" };
+    saveAccounts(accounts);
+    setCurrentUser(u);
+  } catch(e){}
+}
+function applyAccount(u){                    // 切到某个账号
+  const a = loadAccounts()[u];
+  if (!a) return false;
+  g_accountKey = u;
+  g_profile = accountToProfile(a);
+  setCurrentUser(u);
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(g_profile)); } catch(e){}
+  net.name = g_profile.name;
+  try { localStorage.setItem("sj_name", net.name); } catch(e){}
+  avatarLayout();
+  if (net.on) netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+  return true;
 }
 
 // ---------------- 联机（MQTT 公共 broker，免注册） ----------------
@@ -1818,7 +1894,7 @@ function vpadHit(x,y){                           // 命中的按键 id
   return null;
 }
 function pressBack(){                            // B：返回 / 取消
-  if (g_state===ST_CREATE){ pressKey("x"); return; }
+  if (g_state===ST_CREATE || g_state===ST_LOGIN){ pressKey("x"); return; }
   if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
   if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
   if (net.invite){ netDeclineInvite(); return; }
@@ -1843,18 +1919,45 @@ function deadQuit(){                    // 阵亡后：退出战斗 / 退出队�
 function deadSpectate(){ g_deadChoice=true; Say("观战中……按暂停键可退出"); }
 
 function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
-  // ---- 首次进入：起名 / 选外貌
+  // ---- 登录
+  if (g_state===ST_LOGIN){
+    if (vk==="ArrowUp" || vk==="ArrowDown"){
+      g_login.sel = 1 - g_login.sel; g_login.err = "";
+      if (g_login.sel===0) setInputMode("loginUser", g_login.user, 12, true);
+      else                 setInputMode("loginPwd",  g_login.pwd,  16, true);
+      focusInput();
+      playSfx("snd_menu_move");
+    }
+    if (vk==="z"||vk==="Enter") doLogin();
+    if (vk==="x"||vk==="Escape"){
+      if (!g_login.lock && g_accountKey){ hideInput(); playSfx("snd_menu_move"); GoTitle(); }
+      else g_login.err = "要先登录才能进";
+    }
+    return;
+  }
+  // ---- 首次进入：起名 / 设密码 / 选外貌
   if (g_state===ST_CREATE){
     if (g_createStage===0){
       if (vk==="z"||vk==="Enter") createConfirmName();
-      // 已经有存档的人从标题点进来，B 可以放弃返回
-      if ((vk==="x"||vk==="Escape") && g_profile.skin>=0) GoTitle();
+      // 已经有存档的人从标题点进来，B 可以放弃返回（新建到一半也能反悔）
+      if (vk==="x"||vk==="Escape"){
+        if (g_backup){
+          const b=g_backup; g_backup=null;
+          g_accountKey=b.key; g_profile=b.prof;
+          hideInput(); GoTitle();
+        } else if (g_accountKey){ hideInput(); GoTitle(); }
+      }
+      return;
+    }
+    if (g_createStage===1){
+      if (vk==="z"||vk==="Enter") createConfirmPwd();
+      if (vk==="x"||vk==="Escape"){ g_createStage=0; g_inputMode=""; g_createErr=""; focusInput(); }
       return;
     }
     if (vk==="ArrowLeft"){ g_createSel=(g_createSel+2)%CHARS.length; playSfx("snd_menu_move"); }
     if (vk==="ArrowRight"){ g_createSel=(g_createSel+1)%CHARS.length; playSfx("snd_menu_move"); }
     if (vk==="z"||vk==="Enter") createChooseSkin();
-    if (vk==="x"||vk==="Escape"){ g_createStage=0; if (nameIn) nameIn.focus(); }
+    if (vk==="x"||vk==="Escape"){ g_createStage = g_createNew?1:0; g_inputMode=""; }
     return;
   }
   // ---- 联机暂停面板（最高优先级，不冻结游戏）
@@ -2331,7 +2434,7 @@ function drawFighters(){
   }
 }
 function drawAvatar(){
-  if (!AVATAR.on || g_state===ST_CREATE) return;
+  if (!AVATAR.on || g_state===ST_CREATE || g_state===ST_LOGIN) return;
   const p=AVATAR.pad, x=AVATAR.x-p, y=AVATAR.y-p;
   const w=AVATAR.w+p*2, h=AVATAR.h+p*2;
   ctx.save();
@@ -2344,73 +2447,168 @@ function drawAvatar(){
   if (g_state===ST_TITLE) hot(x-6, y-6, w+12, h+12, openCreate);   // 标题界面点头像 = 重新起名/换外貌
 }
 
-// ---------------- 首次进入：起名 + 选外貌 ----------------
+// ---------------- 隐藏输入框：起名 / 密码 / 登录共用同一个 ----------------
 const nameIn = document.getElementById("nameIn");
-if (nameIn){
-  nameIn.addEventListener("input", ()=>{ g_profile.name = nameIn.value.slice(0,12); });
-  nameIn.addEventListener("keydown", e=>{
-    e.stopPropagation();                      // 打字别触发游戏按键
-    if (e.key==="Enter"){ e.preventDefault(); createConfirmName(); }
-    else if (e.key==="Escape"){ e.preventDefault(); nameIn.blur(); }
-  });
-}
+let g_inputMode = "";                 // name | createPwd | loginUser | loginPwd
 
-function openCreate(){
-  g_state=ST_CREATE; g_stateT=0; g_createStage=0;
-  g_createSel = (g_profile.skin>=0 ? g_profile.skin : 0);
-  if (nameIn) nameIn.value = g_profile.name || "";
-  Say(""); BgmStop(); crtDirty = true;
-  if (!isTouch && nameIn) setTimeout(()=>{ try{ nameIn.focus(); }catch(e){} }, 60);   // 桌面直接可打字
-}
-function createConfirmName(){
-  let n = (nameIn ? nameIn.value : g_profile.name) || "";
-  n = n.replace(/\s+/g," ").trim().slice(0,12);
-  if (!n) n = "KRIS";                          // 什么都不填也能过
-  g_profile.name = n;
-  if (nameIn){ nameIn.value = n; nameIn.blur(); }
-  g_createStage = 1;
-  g_createSel = (g_profile.skin>=0 ? g_profile.skin : 0);
-  playSfx("snd_menu_select");
-}
-function createChooseSkin(){
-  g_profile.skin = g_createSel;
-  saveProfile();
-  net.name = g_profile.name;                   // 组队邀请里显示的就是这个名字
-  try { localStorage.setItem("sj_name", net.name); } catch(e){}
-  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
-  avatarLayout();
-  playSfx("snd_menu_select");
-  GoTitle();
-}
-// 把隐藏输入框摆到画布上的名字框位置：手机点它就会弹系统键盘
-function syncNameInput(bx,by,bw,bh){
+function setInputMode(mode, value, maxLen, force){
   if (!nameIn) return;
-  const on = (g_state===ST_CREATE && g_createStage===0);
-  nameIn.style.pointerEvents = on ? "auto" : "none";
-  if (!on){ if (document.activeElement===nameIn) nameIn.blur(); return; }
+  if (g_inputMode === mode && !force) return;
+  g_inputMode = mode;
+  nameIn.type = (mode==="loginPwd" || mode==="createPwd") ? "password" : "text";
+  nameIn.maxLength = maxLen || (mode==="name"||mode==="loginUser" ? 12 : 16);
+  nameIn.value = value || "";
+}
+function placeInput(mode, value, bx, by, bw, bh, maxLen){
+  if (!nameIn) return;
+  setInputMode(mode, value, maxLen, false);
   const r = cv.getBoundingClientRect();
   const sx = r.width/WINW, sy = r.height/WINH;
   nameIn.style.left   = (r.left + bx*sx) + "px";
   nameIn.style.top    = (r.top  + by*sy) + "px";
   nameIn.style.width  = (bw*sx) + "px";
   nameIn.style.height = (bh*sy) + "px";
+  nameIn.style.pointerEvents = "auto";
 }
+function hideInput(){
+  if (!nameIn) return;
+  if (nameIn.style.pointerEvents !== "none") nameIn.style.pointerEvents = "none";
+  if (document.activeElement === nameIn) nameIn.blur();
+}
+function focusInput(){
+  if (!nameIn) return;
+  try { nameIn.focus({preventScroll:true}); } catch(e){ try { nameIn.focus(); } catch(_){} }
+}
+if (nameIn){
+  nameIn.addEventListener("input", ()=>{
+    const v = nameIn.value;
+    if (g_inputMode==="loginUser")       g_login.user = v.slice(0,12);
+    else if (g_inputMode==="loginPwd")   g_login.pwd  = v.slice(0,16);
+    else if (g_inputMode==="createPwd")  g_createPwd = v.slice(0,16);
+    else                                 g_createName = v.slice(0,12);
+    g_login.err = ""; g_createErr = "";
+  });
+  nameIn.addEventListener("keydown", e=>{
+    e.stopPropagation();                      // 打字别触发游戏按键
+    if (e.key==="Enter"){
+      e.preventDefault();
+      if (g_inputMode==="loginUser" || g_inputMode==="loginPwd") doLogin();
+      else if (g_inputMode==="createPwd") createConfirmPwd();
+      else createConfirmName();
+    } else if (e.key==="Escape"){ e.preventDefault(); nameIn.blur(); }
+    else if (e.key==="ArrowUp" || e.key==="ArrowDown"){ e.preventDefault(); pressKey(e.key); }
+  });
+}
+
+// ---- 登录 / 账号切换 ----
+function openLogin(prefillUser, lock){
+  g_login = { user: prefillUser||"", pwd:"", sel: prefillUser?1:0, err:"", lock: !!lock };
+  g_inputMode = "";                            // 强制下一次渲染重建输入框
+  g_state = ST_LOGIN; g_stateT = 0;
+  Say(""); BgmStop(); crtDirty = true;
+  if (!isTouch) setTimeout(()=>focusInput(), 60);
+}
+function doLogin(){
+  const u = (g_login.user||"").replace(/\s+/g," ").trim().slice(0,12);
+  const p = g_login.pwd || "";
+  if (!u){ g_login.err = "请输入用户名"; return; }
+  const accounts = loadAccounts();
+  const acc = accounts[u];
+  if (!acc){ g_login.err = "没有这个用户名，去「新建存档」吧"; return; }
+  if (acc.pwd && acc.pwd !== hashPwd(p)){ g_login.err = "密码不对，再试一次"; g_login.pwd=""; g_inputMode=""; return; }
+  if (!applyAccount(u)){ g_login.err = "存档读不出来，再试一次"; return; }
+  hideInput();
+  playSfx("snd_menu_select");
+  Say("");
+  GoTitle();
+}
+function newAccountFromLogin(){
+  hideInput();
+  g_backup = { key: g_accountKey, prof: JSON.parse(JSON.stringify(g_profile)) };
+  g_accountKey = ""; g_profile = { name:"", skin:-1, cleared:[false,false,false,false], pwd:"" };
+  openCreate(true);
+}
+
+function openCreate(fromLogin){
+  if (!fromLogin) g_backup = null;
+  g_state=ST_CREATE; g_stateT=0; g_createStage=0;
+  g_createNew = !g_accountKey;                 // 已有账号 = 改名/换外貌，不再设密码
+  g_createPwd = ""; g_createErr = "";
+  g_createName = g_profile.name || "";
+  g_createSel = (g_profile.skin>=0 ? g_profile.skin : 0);
+  g_inputMode = "";                            // 强制重建输入框
+  Say(""); BgmStop(); crtDirty = true;
+  if (!isTouch) setTimeout(()=>focusInput(), 60);   // 桌面直接可打字
+}
+function createConfirmName(){
+  let n = (nameIn ? nameIn.value : g_createName) || "";
+  n = n.replace(/\s+/g," ").trim().slice(0,12);
+  if (!n){ g_createErr = "名字不能是空的"; return; }
+  const accounts = loadAccounts();
+  if (accounts[n] && n !== g_accountKey){      // 名字就是用户名：撞号会让两份存档混在一起
+    g_createErr = "这个名字已经有存档了，换一个或去登录";
+    return;
+  }
+  g_createName = n;
+  if (nameIn) nameIn.blur();
+  g_createErr = "";
+  g_createStage = g_createNew ? 1 : 2;         // 新建 → 设密码；改名 → 直接选外貌
+  g_inputMode = "";
+  playSfx("snd_menu_select");
+  if (g_createStage===1){
+    setInputMode("createPwd", "", 16, true);   // 进入密码阶段：输入框立刻改绑密码字段
+    setTimeout(()=>focusInput(), 60);
+  }
+}
+function createConfirmPwd(){
+  const p = (nameIn ? nameIn.value : g_createPwd) || "";
+  if (p.length < 4){ g_createErr = "密码至少 4 位"; return; }
+  g_createPwd = p.slice(0,16);
+  g_createErr = "";
+  if (nameIn) nameIn.blur();
+  g_createStage = 2;                           // → 选外貌
+  g_inputMode = "";
+  playSfx("snd_menu_select");
+}
+function createChooseSkin(){
+  if (g_createName) g_profile.name = g_createName;
+  g_profile.skin = g_createSel;
+  if (g_createNew) g_profile.pwd = hashPwd(g_createPwd);
+  // 改名 → 账号表的键跟着换
+  const oldKey = g_accountKey, newKey = g_profile.name;
+  if (oldKey && newKey && oldKey !== newKey){
+    const accounts = loadAccounts();
+    if (accounts[oldKey]){ delete accounts[oldKey]; saveAccounts(accounts); }
+  }
+  g_accountKey = newKey;
+  saveProfile();
+  hideInput();
+  net.name = g_profile.name;                   // 组队邀请里显示的就是这个名字
+  try { localStorage.setItem("sj_name", net.name); } catch(e){}
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+  avatarLayout();
+  playSfx("snd_menu_select");
+  g_createNew = false;
+  g_backup = null;
+  GoTitle();
+}
+// 输入框的摆位/切换统一走 placeInput()（见上：起名、设密码、登录共用同一个隐藏 input）
 
 function RenderCreate(){
   const bg0 = img("bg");
   if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
   else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
   const cx = WINW/2;
-  const raw = (nameIn ? nameIn.value : g_profile.name) || "";
-  const shown = raw.replace(/\s+/g," ");
 
   if (g_createStage===0){
+    const raw = (nameIn && g_inputMode==="name") ? nameIn.value : (g_createName||"");
+    const shown = (raw||"").replace(/\s+/g," ");
     outlineText("新 的 旅 途", 0, 40+VOY, 17, "#9fb4e8", cx, false);
     outlineText("你 叫 什 么 名 字 ？", 0, 78+VOY, 40, "#ffec78", cx);
     const bw = Math.min(470, WINW-70), bh = 78, bx = cx-bw/2, by = 168+VOY;
     ctx.fillStyle="rgba(12,10,24,0.85)"; ctx.fillRect(bx,by,bw,bh);
     ctx.strokeStyle="#8fb6ff"; ctx.lineWidth=2.5; ctx.strokeRect(bx,by,bw,bh);
-    syncNameInput(bx,by,bw,bh);
+    placeInput("name", shown, bx, by, bw, bh, 12);
     if (shown){
       ctx.save();
       ctx.font = `bold 30px "Microsoft YaHei","PingFang SC",sans-serif`;
@@ -2424,10 +2622,29 @@ function RenderCreate(){
       outlineText(isTouch?"点 这 里 输 入 名 字":"点框里输入名字 或直接打字", 0, by+bh/2-12, 22, "rgba(180,196,230,0.5)", cx, false);
     }
     outlineText(isTouch?"输入完点键盘上的「完成」，或按 A 确定":"输入后按 Z / Enter 确定", 0, 268+VOY, 15, "#b4d2ff", cx, false);
-    outlineText("名字随便起，组队时队友看到的就是它", 0, 294+VOY, 13, "#8ea2d8", cx, false);
+    outlineText(g_createNew ? "这个名字也是你的登录用户名" : "名字随便起，组队时队友看到的就是它", 0, 294+VOY, 13, "#8ea2d8", cx, false);
+    if (g_createErr) outlineText(g_createErr, 0, 320+VOY, 14, "#ff8a8a", cx, false);
+  } else if (g_createStage===1){
+    const pwd = (nameIn && g_inputMode==="createPwd") ? nameIn.value : (g_createPwd||"");
+    outlineText("设 一 个 密 码", 0, 78+VOY, 40, "#ffec78", cx);
+    outlineText("以后进游戏要用「名字 + 密码」登录，记牢哦", 0, 136+VOY, 15, "#9fb4e8", cx, false);
+    const bw = Math.min(470, WINW-70), bh = 72, bx = cx-bw/2, by = 180+VOY;
+    ctx.fillStyle="rgba(12,10,24,0.85)"; ctx.fillRect(bx,by,bw,bh);
+    ctx.strokeStyle="#8fb6ff"; ctx.lineWidth=2.5; ctx.strokeRect(bx,by,bw,bh);
+    placeInput("createPwd", pwd, bx, by, bw, bh, 16);
+    if (pwd){
+      const dots = "●".repeat(Math.min(pwd.length,16));
+      outlineText(dots, 0, by+bh/2-14, 26, "#fff", cx, false);
+      rightText(`${pwd.length}/16`, bx+bw-12, by+10, 11, "rgba(160,180,220,0.6)", false);
+    } else {
+      outlineText(isTouch?"点 这 里 输 入 密 码":"点框里输入密码 或直接打字", 0, by+bh/2-12, 22, "rgba(180,196,230,0.5)", cx, false);
+    }
+    outlineText("至少 4 位，最多 16 位", 0, 266+VOY, 14, "#b4d2ff", cx, false);
+    if (g_createErr) outlineText(g_createErr, 0, 296+VOY, 15, "#ff8a8a", cx, false);
+    outlineText(isTouch?"A 确定　B 改名":"Z 确定　X 改名", 0, 350+VOY, 15, "#d2dce1", cx, false);
   } else {
     outlineText("选 一 个 样 子", 0, 38+VOY, 34, "#ffec78", cx);
-    outlineText("名字："+(shown||"KRIS"), 0, 86+VOY, 16, "#c8dcff", cx, false);
+    outlineText("名字："+(g_createName||"KRIS"), 0, 86+VOY, 16, "#c8dcff", cx, false);
     const cw=152, chh=212, gap=34, x0=cx-(cw*3+gap*2)/2, y0=120+VOY;
     for (let i=0;i<3;i++){
       const x=x0+i*(cw+gap), y=y0, sel=(i===g_createSel);
@@ -2441,7 +2658,66 @@ function RenderCreate(){
     }
     outlineText(isTouch?"← → 选择　A 确定　B 改名":"← → 选择　Z 确定　X 改名", 0, 352+VOY, 15, "#d2dce1", cx, false);
   }
+  if (g_createStage>1) hideInput();          // 选外貌时不需要输入框
   outlineText(isTouch?"A 确定":"Z 确定", 0, WINH-26, 12, "rgba(140,160,210,0.65)", cx, false);
+}
+
+// ---- 登录页
+function loginBox(x, y, w, h, active, value, placeholder, mask){
+  ctx.fillStyle = active ? "rgba(24,20,44,0.96)" : "rgba(14,12,26,0.86)";
+  ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle = active ? "#ffe878" : "rgba(130,150,190,0.5)";
+  ctx.lineWidth = active ? 2.5 : 1.5;
+  ctx.strokeRect(x,y,w,h);
+  const text = mask ? "●".repeat(Math.min((value||"").length,16)) : (value||"");
+  if (text){
+    outlineText(text, x+18, y+h/2-13, 24, "#fff", -1);
+  } else {
+    outlineText(placeholder, x+18, y+h/2-10, 18, "rgba(150,170,210,0.55)", -1, false);
+  }
+  // 当前焦点：边框呼吸一下，提示可以打字
+  if (active){
+    const a = 0.35 + 0.35*Math.sin(performance.now()/260);
+    ctx.strokeStyle = `rgba(255,232,120,${a})`;
+    ctx.lineWidth = 4; ctx.strokeRect(x-2,y-2,w+4,h+4);
+  }
+}
+function RenderLogin(){
+  const bg0 = img("bg");
+  if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
+  else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
+  const cx = WINW/2;
+  outlineText("登　录", 0, 30+VOY, 46, "#ffec78", cx);
+  outlineText("输入用户名和密码，回到你的存档", 0, 92+VOY, 14, "#9fb4e8", cx, false);
+
+  const bw = Math.min(440, WINW-70), bx = cx-bw/2, bh = 64;
+  const uy = 138+VOY, py = 214+VOY;
+  loginBox(bx, uy, bw, bh, g_login.sel===0, g_login.user, "用户名", false);
+  loginBox(bx, py, bw, bh, g_login.sel===1, g_login.pwd, "密码", true);
+
+  if (g_login.sel===0) placeInput("loginUser", g_login.user, bx, uy, bw, bh, 12);
+  else                 placeInput("loginPwd",  g_login.pwd,  bx, py, bw, bh, 16);
+
+  // 点框切换焦点（手机点一下就弹键盘）
+  hot(bx, uy, bw, bh, ()=>{
+    g_login.sel=0;
+    setInputMode("loginUser", g_login.user, 12, true); focusInput();
+  });
+  hot(bx, py, bw, bh, ()=>{
+    g_login.sel=1;
+    setInputMode("loginPwd", g_login.pwd, 16, true); focusInput();
+  });
+
+  if (g_login.err) outlineText(g_login.err, 0, 288+VOY, 14, "#ff8a8a", cx, false);
+
+  // 进入 / 新建
+  const bwd = Math.min(168, (WINW-90)/2), gap = 22;
+  btn(cx-bwd-gap/2, 316+VOY, bwd, 44, "进 入", ()=>{ playSfx("snd_menu_select"); doLogin(); });
+  btn(cx+gap/2, 316+VOY, bwd, 44, "新 建 存 档", ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); });
+
+  if (g_login.lock) outlineText("请输入这个存档的密码（忘记密码只能新建存档）", 0, 382+VOY, 13, "#8ea2d8", cx, false);
+  else              outlineText(isTouch?"B 返回":"X / ESC 返回", 0, 382+VOY, 13, "#8ea2d8", cx, false);
+  outlineText(isTouch?"↑ ↓ 切换　A 进入":"↑ ↓ 切换　Z 进入", 0, 406+VOY, 13, "#b4d2ff", cx, false);
 }
 
 // ---- 主界面
@@ -2455,6 +2731,15 @@ function RenderTitle(){
   }
   outlineText("混沌挑战", 0, 22+VOY, 56, "#ffec78", WINW/2);
   outlineText("CHOOSE  YOUR  CHAOS", 0, 92+VOY, 15, "#c8dcff", WINW/2, false);
+
+  // 账号 / 登录入口（左上角）：新存档带密码，可以在这里换回别的存档
+  const lx = VOX+14, ly = VOY+8, lw = 152, lh = 30;
+  roundRect(lx, ly, lw, lh, 8);
+  ctx.fillStyle = "rgba(10,8,20,0.55)"; ctx.fill();
+  ctx.strokeStyle = "rgba(160,190,255,0.45)"; ctx.lineWidth = 1.4; ctx.stroke();
+  outlineText(g_profile.name ? `账号 ${g_profile.name} · 登录` : "登录 / 切换账号",
+              0, ly+7, 13, "#cfe0ff", lx+lw/2, false);
+  hot(lx-4, ly-4, lw+8, lh+8, ()=>{ playSfx("snd_menu_move"); openLogin("", false); });
 
   for (let i=0;i<BOSS_N;++i){
     const x=VOX+34+i*146, y=VOY+118, w=132, h=214;
@@ -2562,7 +2847,9 @@ function Render(){
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
+  if (g_state!==ST_CREATE && g_state!==ST_LOGIN) hideInput();
   if (g_state===ST_CREATE){ RenderCreate(); drawVPad(); return; }
+  if (g_state===ST_LOGIN){ RenderLogin(); drawVPad(); return; }
   if (g_state===ST_TITLE){ RenderTitle(); drawAvatar(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
     const bg0 = img("bg");
@@ -3537,12 +3824,21 @@ function loop(now){
 // 联机心跳不能跟着停（否则另一个窗口会看不到你这个玩家）
 setInterval(()=>{ try{ netTick(); }catch(e){} }, 250);
 
-// 资源加载完成 → 有存档直接进主界面，没有就先起名选外貌
+// 资源加载完成 → 有存档直接进主界面，没有就先起名设密码选外貌
 loadFinishCb = ()=>{
   document.getElementById("loading").style.display="none";
   avatarLayout();
-  if (g_profile.skin>=0 && g_profile.name) GoTitle();     // 老玩家
-  else openCreate();                                      // 第一次进来
+  const ca = currentAccount();
+  if (ca && ca.acc && ca.acc.pwd){
+    openLogin(ca.user, true);                 // 新存档（带密码）：先登录才进得去
+  } else if (ca && ca.acc){
+    applyAccount(ca.user);                    // 旧存档 / 无密码账号：和以前一样直接进
+    GoTitle();
+  } else if (g_profile.skin>=0 && g_profile.name){
+    GoTitle();                                // 兜底：账号表读不出来但档案还在
+  } else {
+    openCreate();                             // 第一次进来
+  }
   playVoice("Jevil_voiceclip_CHAOS.wav");
   requestAnimationFrame(t=>{ lastT=t; loop(t); });
 };
