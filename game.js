@@ -2817,7 +2817,7 @@ function RenderSetPwd(){
               0, 84+VOY, 14, "#9fb4e8", cx, false);
 
   const bw = Math.min(420, WINW-80), bx = cx-bw/2, bh = 58;
-  const py1 = 128+VOY, py2 = 216+VOY;
+  const py1 = 126+VOY, py2 = 224+VOY;
   const p1 = (nameIn && g_inputMode==="setPwd")  ? nameIn.value : g_setpwd.pwd;
   const p2 = (nameIn && g_inputMode==="setPwd2") ? nameIn.value : g_setpwd.pwd2;
   outlineText("新密码（至少 4 位，最多 16）", bx, py1-26, 13, "#b4d2ff", -1, false);
@@ -2832,14 +2832,14 @@ function RenderSetPwd(){
   hot(bx, py2, bw, bh, ()=>{ g_setpwd.sel=1; setInputMode("setPwd2", g_setpwd.pwd2, 16, true); focusInput(); });
 
   const msg = g_setpwd.err || g_setpwd.ok;
-  if (msg) outlineText(msg, 0, 288+VOY, 15, g_setpwd.err?"#ff8a8a":"#8ff0b8", cx, false);
+  if (msg) outlineText(msg, 0, 294+VOY, 15, g_setpwd.err?"#ff8a8a":"#8ff0b8", cx, false);
 
   const bwd = Math.min(180, (WINW-100)/2), gap = 24;
-  btn(cx-bwd-gap/2, 316+VOY, bwd, 44, "保 存", ()=>{ playSfx("snd_menu_select"); doSetPwd(); });
-  btn(cx+gap/2, 316+VOY, bwd, 44, "返 回", ()=>{ playSfx("snd_menu_move"); hideInput(); GoTitle(); });
+  btn(cx-bwd-gap/2, 324+VOY, bwd, 44, "保 存", ()=>{ playSfx("snd_menu_select"); doSetPwd(); });
+  btn(cx+gap/2, 324+VOY, bwd, 44, "返 回", ()=>{ playSfx("snd_menu_move"); hideInput(); GoTitle(); });
 
-  outlineText("密码只存在这台设备上，忘了就进不去（可以新建存档重来）", 0, 382+VOY, 12, "#8ea2d8", cx, false);
-  outlineText(isTouch?"↑ ↓ 切换　A 保存":"↑ ↓ 切换　Z / Enter 保存　ESC 返回", 0, 406+VOY, 13, "#b4d2ff", cx, false);
+  outlineText("密码只存在这台设备上，忘了就进不去（可以新建存档重来）", 0, 388+VOY, 12, "#8ea2d8", cx, false);
+  outlineText(isTouch?"↑ ↓ 切换　A 保存":"↑ ↓ 切换　Z / Enter 保存　ESC 返回", 0, 412+VOY, 13, "#b4d2ff", cx, false);
 }
 
 // ---- 主界面
