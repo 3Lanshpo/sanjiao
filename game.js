@@ -126,19 +126,34 @@ let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具
 const SAVE_KEY = "sanjiao_profile_v1";
 const CHARS = [
   // img/frames = 待机动画；atk/atkN = 原版挥刀动画（攻击时整段替换）
-  { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6, atk:"atk_kris",   atkN:7, atkS:1.00 },
-  { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50 },
-  { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70 },
+  // spd/dmg/maxhp = 角色被动：移动速度倍率 / 造成伤害倍率 / 血量上限
+  { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6, atk:"atk_kris",   atkN:7, atkS:1.00,
+    spd:1.20, dmg:1.00, maxhp:120, passive:"移动速度 +20%" },
+  { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50,
+    spd:1.00, dmg:1.10, maxhp:120, passive:"造成伤害 +10%" },
+  { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70,
+    spd:1.00, dmg:1.00, maxhp:150, passive:"血量上限 150" },
 ];
+// 当前角色的被动（没选外貌时按 KRIS 算）
+function myChar(){
+  const i = g_profile.skin|0;
+  return (i>=0 && i<CHARS.length) ? CHARS[i] : CHARS[0];
+}
+function maxHp(){ return myChar().maxhp || PLAYER_MAXHP; }
+function heartSpd(){ return HEART_SPD * (myChar().spd || 1); }
+function dmgMul(){ return myChar().dmg || 1; }
+function skillDmg(sk){ return sk.dmg>0 ? Math.round(sk.dmg*dmgMul()) : 0; }
+function skillLine(sk, d){ return sk.line.replace("{d}", String(d)); }
+function skillPerTxt(sk){ return sk.perTxt.replace("{d}", String(skillDmg(sk))); }
 // ---------------- 角色专属技能（按外貌索引，消耗一回合行动） ----------------
 // 联机：伤害走 act 消息由队长权威扣血；附加效果走 sk 消息，除粗暴砍击外都对队友生效。
 const SKILLS = [
   { key:"sword", name:"胜利之剑", col:"#ff9ab8",
-    dmg:60,  perTxt:"耗1回合 · 60伤害 · 敌攻-50%",
-    line:"胜利之剑！光刃劈开混沌！（60 伤害，本回合受到的伤害减半）" },
+    dmg:60,  perTxt:"耗1回合 · {d}伤害 · 敌攻-50%",
+    line:"胜利之剑！光刃劈开混沌！（{d} 伤害，本回合受到的伤害减半）" },
   { key:"chop",  name:"粗暴砍击", col:"#ffb35a",
-    dmg:110, perTxt:"耗1回合 · 110伤害",
-    line:"粗暴砍击！！（110 伤害）" },
+    dmg:110, perTxt:"耗1回合 · {d}伤害",
+    line:"粗暴砍击！！（{d} 伤害）" },
   { key:"potion",name:"神奇药水", col:"#8fe6a0",
     dmg:0,   perTxt:"耗1回合 · 3回合×30HP",
     line:"神奇药水！暖流涌上来……（接下来 3 回合每回合回复 30 HP）" },
@@ -587,6 +602,7 @@ function netTeamMsg(m){
   if (m.t==="rtc"){ netRtcOnSignal(m); return; }        // 直连信令
   if (m.t==="hb"){                                       // 队友心位置+HP（双路到达的旧包由 netPartnerHeart 按 ts 丢弃）
     netPartnerHeart(m.x, m.y, m.ts); net.php=m.hp;
+    if (m.mh) net.pmh=m.mh;                                 // 队友的血量上限（Ralsei 150 / 其它 120）
     if (m.d!==undefined) net.pDead=!!m.d;
   } else if (m.t==="ping"){                              // 量单程延迟：只用自己的时钟算 RTT，避免两端时钟偏差
     const o={t:"pong", from:net.cid, ts:m.ts||0};
@@ -676,7 +692,7 @@ function netTeamMsg(m){
     if (m.ts) net.bTs=m.ts;
     const now=performance.now(), dtS=(now-(net.lastBf||now))/1000 || 0.1;
     net.lastBf=now;
-    if (m.h){ netPartnerHeart(m.h[0], m.h[1], m.h[3]); net.php=m.h[2]; }
+    if (m.h){ netPartnerHeart(m.h[0], m.h[1], m.h[3]); net.php=m.h[2]; if (m.h[4]) net.pmh=m.h[4]; }
     if (m.bh!==undefined){ net.bh=m.bh; net.bshown=m.bs?1:0;
       g_jevHp=m.bh; if (m.bs) g_jevHpShown=true; }   // boss 血量以队长为准
     if (m.d!==undefined) net.pDead=!!m.d;            // 队友是否已阵亡
@@ -839,7 +855,7 @@ function netTick(){
     net.lastHb=nowMs;
     const o={t:"hb", from:net.cid, ts:nowMs,
       x:g_dead?-999:Math.round(g_heartX), y:g_dead?-999:Math.round(g_heartY),
-      hp:Math.round(g_hp), d:g_dead?1:0};
+      hp:Math.round(g_hp), mh:Math.round(maxHp()), d:g_dead?1:0};
     if (net.dcOk && net.dc && net.dc.readyState==="open"){
       try { net.dc.send(JSON.stringify(o)); } catch(e){}
       if (nowMs-(net.lastHbMq||0)>400){ net.lastHbMq=nowMs; netPub(topic, o, 0); }
@@ -1008,7 +1024,7 @@ function tickRegen(){                      // 药水剩余回合数 -1，并回�
   g_buff.regen--;
   if (g_dead) return;
   const before=g_hp;
-  g_hp=Math.min(PLAYER_MAXHP, g_hp+30);
+  g_hp=Math.min(maxHp(), g_hp+30);
   const got=Math.round(g_hp-before);
   if (got>0){
     AddRing(g_heartX, g_heartY, 52, 120, 255, 160);
@@ -1052,7 +1068,7 @@ function Say(s){ g_subtitle = s; }
 
 function ResetGame(){
   const B = Boss();
-  g_hp=PLAYER_MAXHP; g_items=3; g_pacify=0; g_turn=0;
+  g_hp=maxHp(); g_items=3; g_pacify=0; g_turn=0;
   g_gearUse={scythe:0,tv:0,fuse:0,guitar:0};        // 新一场：道具次数回满
   g_skillUse=0;                                     // 新一场：专属技能每局一次，重新可用
   g_buff={scythe:false,tv:false,fuse:false,guitar:0,weaken:0,regen:0,chill:false};
@@ -1278,9 +1294,10 @@ function useSkill(after){
   }
   g_skillUse++;
   playSfx("snd_menu_select");
+  const sd = skillDmg(sk);                        // 角色被动（Susie：伤害 +10%）
   if (sk.dmg>0){                                  // 有伤害的：原地挥一刀
     startPAttack(0, "fight");
-    DoAttack(sk.dmg);
+    DoAttack(sd);
     AddShake(0.2, 4);
   }
   if (sk.key==="sword"){
@@ -1294,9 +1311,9 @@ function useSkill(after){
   // 联机：除粗暴砍击外，附加效果对队友也生效
   if (sk.key!=="chop" && net.role)
     netRtcSend({t:"sk", from:net.cid, turn:g_turn, k:sk.key}, 1, 2);
-  g_actionKind="skill"; g_actionDmg=sk.dmg;
+  g_actionKind="skill"; g_actionDmg=sd;
   if (g_state===ST_WIN || g_state===ST_SPARE || g_jevHp<=0) return;    // 已经结算：别再盖掉结算画面
-  StartDialog(sk.line, after);
+  StartDialog(skillLine(sk, sd), after);
 }
 function DoPlayerAction(){
   const B = Boss();
@@ -1323,7 +1340,7 @@ function DoPlayerAction(){
     if (!it){ g_state=ST_MENU; g_sub=SM_NONE; return; }
     if (it.kind==="candy"){
       if (g_items>0){
-        g_items--; g_hp=Math.min(PLAYER_MAXHP, g_hp+60);
+        g_items--; g_hp=Math.min(maxHp(), g_hp+60);
         g_dmg.push({x:JEV_CX, y:JEV_CY-60, vy:-40, life:0.8, val:60, miss:false});
         StartDialog("你吃掉了魔法软糖，回复了 60 HP！", after);
       } else StartDialog("软糖吃光了……", after);
@@ -1466,7 +1483,7 @@ function Update(dt){
     const ramp = (g_buff.chill ? 1.0 : 1.0+Math.min(1.0,g_turn*0.10))*B.patW*gearRate();   // 音波干扰：ramp 越小 → 弹幕越稀
 
     // 红心移动（键盘方向键 / 屏幕方向键都写进同一个 keys）
-    let sp = HEART_SPD*dt;
+    let sp = heartSpd()*dt;
     if (!g_dead){
       if (keys.has("ArrowLeft"))  g_heartX-=sp;
       if (keys.has("ArrowRight")) g_heartX+=sp;
@@ -1797,7 +1814,7 @@ function Update(dt){
         if (b.pick){                            // 拾取爱心：回血（原来掉进通用碰撞，被当成伤害）
           const dxp=b.x-g_heartX, dyp=b.y-g_heartY;
           if (!g_dead && dxp*dxp+dyp*dyp < (b.r+7)*(b.r+7)*0.80){
-            g_hp=Math.min(PLAYER_MAXHP, g_hp+12);
+            g_hp=Math.min(maxHp(), g_hp+12);
             AddRing(b.x,b.y,50,255,120,170);
             BurstParts(b.x,b.y,10,90,255,170,150,0.5);
             playSfx("snd_menu_select");
@@ -1920,7 +1937,7 @@ function Update(dt){
       if (b.pick){
         const dx=b.x-g_heartX, dy=b.y-g_heartY;
         if (dx*dx+dy*dy < (b.r+7)*(b.r+7)*0.80){
-          g_hp=Math.min(PLAYER_MAXHP, g_hp+12);
+          g_hp=Math.min(maxHp(), g_hp+12);
           AddRing(b.x,b.y,50,255,120,170);
           BurstParts(b.x,b.y,10,90,255,170,150,0.5);
           playSfx("snd_menu_select");
@@ -2213,7 +2230,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
       const c=(250+392)*0.5;
       let acc=1.0-Math.abs(g_barX-c)/71.0;
       if (acc<0) acc=0;
-      g_pendingDmg=Math.floor(16+acc*acc*acc*58);
+      g_pendingDmg=Math.floor((16+acc*acc*acc*58)*dmgMul());   // 角色被动（Susie：伤害 +10%）
       if (g_buff.scythe){                            // 恶魔镰刀：这一次出刀伤害翻倍
         g_pendingDmg*=2; g_buff.scythe=false;
         setToast(`恶魔镰刀 —— 伤害 ×2（${g_pendingDmg}）`, "#d9a6ff");
@@ -2855,9 +2872,11 @@ function RenderCreate(){
       ctx.lineWidth = sel?3:1.5; ctx.strokeRect(x,y,cw,chh);
       drawCharFrame(i, x+cw/2, y+92+(sel?Math.sin(g_animT*4)*3:0), 104, cw-20);
       outlineText(CHARS[i].label, 0, y+168, 20, sel?"#fff08c":"#d6d2dc", x+cw/2);
-      // 专属技能名（战斗里在 ACT 第一项使用，消耗一回合，每局一次）
-      outlineText(`★ ${SKILLS[i].name}·每局1次`, 0, y+190, 11,
+      // 专属技能名（战斗里在 ACT 第一项使用，消耗一回合，每局一次）+ 角色被动
+      outlineText(`★ ${SKILLS[i].name}·每局1次`, 0, y+181, 10.5,
                   sel?"#ffc9d8":"rgba(185,198,222,0.72)", x+cw/2, false);
+      outlineText(`被动：${CHARS[i].passive}`, 0, y+197, 9.5,
+                  sel?"rgba(165,228,255,0.95)":"rgba(158,176,205,0.72)", x+cw/2, false);
       hot(x,y,cw,chh, ()=>{ g_createSel=i; playSfx("snd_menu_move"); });
     }
     outlineText(isTouch?"← → 选择　A 确定　B 改名":"← → 选择　Z 确定　X 改名", 0, 352+VOY, 15, "#d2dce1", cx, false);
@@ -3407,10 +3426,10 @@ function Render(){
     const byy = isTouch ? 10 : UI_BOT-72;
     outlineText("HP", 14, byy-4, 22, "#ffe678", -1);
     ctx.fillStyle="rgba(40,15,25,0.86)"; ctx.fillRect(46,byy,110,18);
-    ctx.fillStyle="#ffc850"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),18);
-    ctx.fillStyle="rgba(255,255,200,0.9)"; ctx.fillRect(46,byy,110*(g_hp/PLAYER_MAXHP),6);
+    ctx.fillStyle="#ffc850"; ctx.fillRect(46,byy,110*(g_hp/maxHp()),18);
+    ctx.fillStyle="rgba(255,255,200,0.9)"; ctx.fillRect(46,byy,110*(g_hp/maxHp()),6);
     ctx.strokeStyle="rgba(240,240,245,1)"; ctx.lineWidth=1.6; ctx.strokeRect(46,byy,110,18);
-    outlineText(`${Math.ceil(g_hp)}/${Math.floor(PLAYER_MAXHP)}`, 160, byy-2, 15, "#fff", -1, false);
+    outlineText(`${Math.ceil(g_hp)}/${Math.floor(maxHp())}`, 160, byy-2, 15, "#fff", -1, false);
 
     // 本回合生效的道具/技能增益（小字贴在 HP 右侧，免得挤占战斗区）
     const bl=[];
@@ -3505,7 +3524,7 @@ function Render(){
         outlineText(opts[i], BOX_X0+44, y-8, isSkill?21:20, col, -1);
         if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
           drawImg(img("soul"), BOX_X0+24, y-5, 22,22); ctx.restore(); }
-        if (isSkill) outlineText(gone ? "本局已用掉" : `★ ${sk.perTxt}`, BOX_X0+178, y-2, 10.5,
+        if (isSkill) outlineText(gone ? "本局已用掉" : `★ ${skillPerTxt(sk)}`, BOX_X0+178, y-2, 10.5,
                                  gone ? "rgba(160,160,180,0.7)"
                                       : (i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)"), -1, false);
       }
@@ -3909,7 +3928,7 @@ function renderNetHUD(uiBot){
   }
   // ---- 队友 HP（手机：跟着自己的 HP 一起放左上角；桌面：叠在自己 HP 条上方）
   if (net.role && net.php!==undefined && uiBot!==undefined && g_state!==ST_TITLE){
-    const pw=Math.max(0,Math.min(1,net.php/PLAYER_MAXHP));
+    const pw=Math.max(0,Math.min(1,net.php/(net.pmh||PLAYER_MAXHP)));
     const ty = isTouch ? 46 : uiBot-94;
     outlineText("队友 "+net.partnerName, 46, ty-15, 11, "#9fb4e8", -1, false);
     ctx.fillStyle="rgba(10,14,30,0.86)"; ctx.fillRect(46,ty,110,9);
