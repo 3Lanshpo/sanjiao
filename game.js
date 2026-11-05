@@ -23,7 +23,8 @@ const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_WAIT=11,                     // 联机：我已出刀，等队友出刀
       ST_CREATE=12,                   // 首次进入：起名 + 设密码 + 选外貌
       ST_LOGIN=13,                    // 登录：用户名 + 密码 → 回到对应存档
-      ST_SETPWD=14;                   // 给当前存档补设 / 修改密码（老存档没密码时用）
+      ST_SETPWD=14,                   // 给当前存档补设 / 修改密码（老存档没密码时用）
+      ST_SPARE=15;                    // 饶恕结算：不是胜利、不掉道具，只在卡牌下标「饶恕」
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
 
 // 招式
@@ -159,7 +160,7 @@ const ITEMS = [
 ];
 const ItemByKey = k => ITEMS.find(i=>i.key===k);
 
-let g_profile = { name:"", skin:-1, cleared:[false,false,false,false], pwd:"" };
+let g_profile = { name:"", skin:-1, cleared:[false,false,false,false], spared:[false,false,false,false], pwd:"" };
 let g_accountKey = "";        // 当前账号在账号表里的键（= 玩家名）
 let g_createStage = 0;        // 0 = 起名，1 = 设密码，2 = 选外貌
 let g_createSel = 0;          // 外貌光标
@@ -215,8 +216,10 @@ function currentUserName(){ try { return localStorage.getItem(CUR_KEY) || ""; } 
 function setCurrentUser(u){ try { localStorage.setItem(CUR_KEY, u||""); } catch(e){} }
 function accountToProfile(a){
   const cl = Array.isArray(a.cleared) ? a.cleared : [];
+  const sp = Array.isArray(a.spared) ? a.spared : [];
   return { name: a.name||"", skin: (a.skin|0), pwd: a.pwd||"",
-           cleared: [0,1,2,3].map(i=>!!cl[i]) };
+           cleared: [0,1,2,3].map(i=>!!cl[i]),
+           spared:  [0,1,2,3].map(i=>!!sp[i]) };
 }
 function currentAccount(){                   // 当前登录的账号（没登录/没存档 → null）
   const u = currentUserName();
@@ -241,7 +244,8 @@ function loadProfile(){                      // 启动时把当前账号载进 g
     if (!(skin>=0 && skin<CHARS.length)) return false;
     const cl = Array.isArray(p.cleared) ? p.cleared : [];
     const acc = { name: p.name.trim().slice(0,12), skin, pwd:"",
-                  cleared: [0,1,2,3].map(i=>!!cl[i]) };
+                  cleared: [0,1,2,3].map(i=>!!cl[i]),
+                  spared:  [false,false,false,false] };
     accounts[acc.name] = acc;
     saveAccounts(accounts);
     setCurrentUser(acc.name);
@@ -258,6 +262,7 @@ function saveProfile(){                      // 写回当前账号（同时保�
     const accounts = loadAccounts();
     accounts[u] = { name: g_profile.name, skin: g_profile.skin,
                     cleared: (g_profile.cleared||[false,false,false,false]).slice(0,4),
+                    spared: (g_profile.spared||[false,false,false,false]).slice(0,4),
                     pwd: g_profile.pwd || (accounts[u] && accounts[u].pwd) || "" };
     saveAccounts(accounts);
     setCurrentUser(u);
@@ -649,8 +654,9 @@ function netTeamMsg(m){
     Say(m.txt||"");
   } else if (m.t==="st" && isMember()){                  // 状态同步（胜负/台词）
     if (m.s===g_state) return;                           // QoS1 重复消息
-    if (m.s===ST_WIN||m.s===ST_LOSE){
-      if (m.s===ST_WIN){ AwardDrop(g_boss); g_state=ST_WIN; }   // 队友看到的胜利也算通关掉落
+    if (m.s===ST_WIN||m.s===ST_LOSE||m.s===ST_SPARE){
+      if (m.s===ST_WIN){ AwardDrop(g_boss); g_state=ST_WIN; }       // 队友看到的胜利也算通关掉落
+      else if (m.s===ST_SPARE){ MarkSpared(g_boss); g_lastDrop=""; g_state=ST_SPARE; }
       else g_state=m.s;
       g_stateT=0; Say(m.txt||"");
     } else if (m.s===ST_MENU){
@@ -877,7 +883,7 @@ function netTick(){
       }
       // ② 队友看不到的状态迁移（胜利/失败/台词）
       if (g_state!==net.lastState){
-        if (g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_MENU)
+        if (g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_SPARE||g_state===ST_MENU)
           netRtcSend({t:"st", from:net.cid, s:g_state, txt:g_subtitle}, 1, 3);
         net.lastState=g_state;
       }
@@ -1012,11 +1018,18 @@ function tickRegen(){                      // 药水剩余回合数 -1，并回�
   }
 }
 function setToast(txt, col){ g_toast={txt, t:2.2, col:col||"#ffe878"}; }
-function AwardDrop(boss){                  // 打赢/饶恕都算通关，存档记下并掉落道具
+function AwardDrop(boss){                  // 只有打赢才算通关：存档记下并把道具掉出来
   const it = ITEMS[boss]; if (!it) return;
   if (!Array.isArray(g_profile.cleared)) g_profile.cleared=[false,false,false,false];
   g_profile.cleared[boss]=true;
   g_lastDrop=it.key;
+  saveProfile();
+}
+function MarkSpared(boss){                 // 饶恕：不算通关、不掉道具，只在卡牌下标「饶恕」
+  if (!Array.isArray(g_profile.spared)) g_profile.spared=[false,false,false,false];
+  if (g_profile.spared[boss]) return;
+  g_profile.spared[boss]=true;
+  g_lastDrop="";
   saveProfile();
 }
 function itemList(){                       // ITEM 子菜单：软糖 + 已拥有的道具
@@ -1192,9 +1205,15 @@ function HitJevil(dmg){
     WinBattle(`${Boss().name} 倒下了……`);
   }
 }
-function WinBattle(txt){                       // 打赢/饶恕都走这里：记通关 + 掉道具
+function WinBattle(txt){                       // 打赢：记通关 + 掉道具
   if (g_state!==ST_WIN) AwardDrop(g_boss);
   g_state=ST_WIN; g_stateT=0;
+  Say(txt||"");
+}
+function SpareBattle(txt){                     // 饶恕：不走胜利、不掉道具，只盖章「饶恕」
+  if (g_state!==ST_WIN && g_state!==ST_SPARE) MarkSpared(g_boss);
+  g_lastDrop="";
+  g_state=ST_SPARE; g_stateT=0;
   Say(txt||"");
 }
 function DoAttack(dmg){        // 出刀：队长端权威扣血；队员端只出表现，血量等队长快照回灌
@@ -1276,7 +1295,7 @@ function useSkill(after){
   if (sk.key!=="chop" && net.role)
     netRtcSend({t:"sk", from:net.cid, turn:g_turn, k:sk.key}, 1, 2);
   g_actionKind="skill"; g_actionDmg=sk.dmg;
-  if (g_state===ST_WIN || g_jevHp<=0) return;    // 一刀打死了：别再盖掉结算画面
+  if (g_state===ST_WIN || g_state===ST_SPARE || g_jevHp<=0) return;    // 已经结算：别再盖掉结算画面
   StartDialog(sk.line, after);
 }
 function DoPlayerAction(){
@@ -1321,7 +1340,8 @@ function DoPlayerAction(){
       if (g_spareReady){
         for (let i=0;i<10;++i)
           g_sparks.push({x:JEV_CX+rnd(-80,80), y:JEV_CY+rnd(-90,90), t:0, scale:rnd(1.0,2.0)});
-        WinBattle(`${B.name} 安静下来，睡了一个好觉……`);
+        AddRing(JEV_CX, JEV_CY, 110, 160, 255, 210);
+        SpareBattle(`你放过了${B.name}……它安心地睡着了。`);
         g_sub=SM_NONE;
         return;
       } else {
@@ -2132,7 +2152,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
   }
   if (vk==="Enter"){
     // 战斗中 Enter 归菜单确认用；只有在大厅/结算界面 Enter 才是退队
-    if (isMember() && (g_state===ST_TITLE||g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_INTRO)){ netLeave(); return; }
+    if (isMember() && (g_state===ST_TITLE||g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_SPARE||g_state===ST_INTRO)){ netLeave(); return; }
     if (net.invite){ netAcceptInvite(); return; }                // 同意邀请
     if ((g_state===ST_TITLE||g_state===ST_MENU) && !net.role){
       const L=netLobbyList();
@@ -2207,7 +2227,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
       if (g_jevHp>0){ g_state=ST_DMG; g_stateT=0; }        // 打死了就别覆盖成结算动作（否则看不到胜利画面）
     }
     break;
-  case ST_WIN: case ST_LOSE:
+  case ST_WIN: case ST_LOSE: case ST_SPARE:
     if (isMember()) break;                                       // 成员等队长同步
     if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); StartBattle(g_boss); }   // 重开也要广播，队员才不会卡在结算画面
     break;
@@ -2504,7 +2524,7 @@ function pAtkOffset(a, dash){                  // 冲出去 → 顿一下 → �
 }
 function drawFighters(){
   // 结算画面（GAME OVER / 胜利）有整屏覆盖文字，角色画上去只会变成残影
-  if (g_state===ST_LOSE || g_state===ST_WIN) return;
+  if (g_state===ST_LOSE || g_state===ST_WIN || g_state===ST_SPARE) return;
   const list=fighterList().slice().sort((a,b)=>a.h-b.h);   // 小的（远的）先画
   // 开场：角色从左侧走进来
   let inK=1;
@@ -2674,7 +2694,7 @@ function doLogin(){
 function newAccountFromLogin(){
   hideInput();
   g_backup = { key: g_accountKey, prof: JSON.parse(JSON.stringify(g_profile)) };
-  g_accountKey = ""; g_profile = { name:"", skin:-1, cleared:[false,false,false,false], pwd:"" };
+  g_accountKey = ""; g_profile = { name:"", skin:-1, cleared:[false,false,false,false], spared:[false,false,false,false], pwd:"" };
   openCreate(true);
 }
 
@@ -3008,12 +3028,17 @@ function RenderTitle(){
     outlineText(sub, 0, y+164, 15, "#bec8dc", x+w/2, false);
     let star=""; for (let s=0;s<=i;++s) star+="★";
     outlineText(star, 0, y+182, 15, "#ff7896", x+w/2, false);
-    // 打赢过：卡牌下方盖章（同时提示掉落的道具）
-    if (g_profile.cleared && g_profile.cleared[i]){
-      const it=ITEMS[i];
-      ctx.fillStyle="rgba(120,255,180,0.13)";
+    // 打赢过 / 饶恕过：卡牌下方盖章（打赢才带道具，饶恕只记「饶恕」）
+    const clr = !!(g_profile.cleared && g_profile.cleared[i]);
+    const spr = !!(g_profile.spared  && g_profile.spared[i]);
+    if (clr || spr){
+      let mark, mcol, bg, fs=12;
+      if (clr && spr){ mark="√ 成功 · ☮ 饶恕"; mcol="#a8efd6"; bg="rgba(150,220,255,0.13)"; fs=11; }
+      else if (clr) { mark=`√ 成功 · ${ITEMS[i].short}`; mcol="#8ff0b8"; bg="rgba(120,255,180,0.13)"; }
+      else          { mark="☮ 饶恕"; mcol="#8fe0ff"; bg="rgba(120,200,255,0.15)"; }
+      ctx.fillStyle=bg;
       ctx.fillRect(x+6, y+195, w-12, 15);
-      outlineText(`√ 成功 · ${it.short}`, 0, y+196, 12, "#8ff0b8", x+w/2, false);
+      outlineText(mark, 0, y+196, fs, mcol, x+w/2, false);
     }
   }
   outlineText(isTouch?"方向键选择　A 开战　·　点右上角头像可改名":"← → 选择　Z 开战　·　点右上角头像可改名", 0, 352+VOY, 15, "#d2dce1", WINW/2, false);
@@ -3133,7 +3158,7 @@ function Render(){
   if (g_state!==ST_LOSE){
     let jf=null;
     if (g_boss===0){
-      if (g_state===ST_WIN){ jf=img("jevil_spared")||img("jevil"); const sc=1+Math.sin(g_animT*2)*0.03; jw*=sc; jh*=sc; }
+      if (g_state===ST_WIN||g_state===ST_SPARE){ jf=img("jevil_spared")||img("jevil"); const sc=1+Math.sin(g_animT*2)*0.03; jw*=sc; jh*=sc; }
       else if (g_hitFlash>0 && frameCount("jevil_hurt_",8)>0){
         jf=IMG["jevil_hurt_"+(Math.floor(g_animT*24)%8)]; jw=200*bk; jh=130*bk;
       }
@@ -3157,7 +3182,7 @@ function Render(){
     ctx.beginPath(); ctx.ellipse(jx+sx, jy, JEV_W*0.34, JEV_H*0.36, 0, 0, 6.29); ctx.fill();
   }
   // boss 血条
-  if (g_jevHpShown && g_state!==ST_WIN && g_state!==ST_LOSE){
+  if (g_jevHpShown && g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_SPARE){
     ctx.fillStyle="rgba(30,20,35,0.8)"; ctx.fillRect(220,14,200,10);
     ctx.fillStyle="#78c8ff"; ctx.fillRect(220,14,200*(g_jevHp/Boss().maxhp),10);
     ctx.strokeStyle="rgba(240,240,255,0.86)"; ctx.lineWidth=1.6; ctx.strokeRect(220,14,200,10);
@@ -3175,7 +3200,7 @@ function Render(){
   }
 
   // ---- 战斗框
-  if (g_state!==ST_WIN && g_state!==ST_LOSE) {
+  if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_SPARE) {
     const breathe = 0.5+0.5*Math.sin(g_animT*2.2);
     ctx.fillStyle="rgba(5,3,12,0.59)";
     ctx.fillRect(BOX_X0, BOX_Y0, BOX_X1-BOX_X0, BOX_Y1-BOX_Y0);
@@ -3368,7 +3393,7 @@ function Render(){
   }
 
   // ---- 字幕（预警阶段框沿已经写着同一句招式名，别再叠一遍）
-  if (g_subtitle && g_state!==ST_WIN && g_state!==ST_LOSE){
+  if (g_subtitle && g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_SPARE){
     let dup=false;
     if (g_state===ST_ATTACK && g_stateT<Boss().warn){
       for (let i=0;i<4;++i) if (Boss().pat[i]===g_pattern && Boss().patLine[i]===g_subtitle){ dup=true; break; }
@@ -3377,7 +3402,7 @@ function Render(){
   }
   // ---- 底部 UI（贴屏幕底边，预留手机手势条/安全区）
   const UI_BOT = WINH - SAFE_B;          // 底部 UI 的基准线
-  if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_INTRO){
+  if (g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_SPARE && g_state!==ST_INTRO){
     // 手机上把 HP 挪到左上角：左下角要让给方向键
     const byy = isTouch ? 10 : UI_BOT-72;
     outlineText("HP", 14, byy-4, 22, "#ffe678", -1);
@@ -3493,9 +3518,12 @@ function Render(){
       if (g_sub===SM_MERCY && g_spareReady){
         const im=img("sparkle");
         if (im){ ctx.save(); ctx.imageSmoothingEnabled=false;
-          drawImg(im, BOX_X1-40, BOX_Y0+30, 36,36, g_animT*160); ctx.restore(); }
-        outlineText("!!", BOX_X1-66, BOX_Y0+20, 22, "#ffe65a", -1);
+          drawImg(im, BOX_X0+124, BOX_Y0+22, 34,34, g_animT*160); ctx.restore(); }
+        outlineText("!!", BOX_X0+96, BOX_Y0+16, 22, "#ffe65a", -1);
       }
+      if (g_sub===SM_MERCY)
+        outlineText("饶恕 = 放它走 · 不算胜利、不掉道具（卡牌下会记下饶恕）",
+                    BOX_X0+24, BOX_Y1-28, 11, "rgba(150,205,240,0.85)", -1, false);
       outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+10, 14, "#9aa8c8", -1, false);
     }
     ctx.restore();
@@ -3511,7 +3539,7 @@ function Render(){
   ctx.restore();
 
   // ---- 胜利 / 失败
-  if (g_state===ST_WIN || g_state===ST_LOSE){
+  if (g_state===ST_WIN || g_state===ST_LOSE || g_state===ST_SPARE){
     ctx.fillStyle="rgba(0,0,0,0.72)"; ctx.fillRect(0,0,WINW,WINH);
     const im=img("sparkle");
     if (im){
@@ -3523,12 +3551,19 @@ function Render(){
       }
       ctx.restore();
     }
-    const big = g_state===ST_WIN?"胜  利 ！":"GAME OVER";
-    outlineText(big, 0, 150, 56, g_state===ST_WIN?"#ffeb5a":"#ff4646", WINW/2);
-    const flavor = g_state===ST_WIN
-      ? (g_spareReady ? `${Boss().name}安静下来，做了一个甜甜的梦……` : `${Boss().name}被打倒了，混沌暂时散去……`)
-      : (net.role ? "两个人都倒下了……再试一次？" : "但你还有机会——重新挑战，或者换个对手。");
-    outlineText(flavor, 0, 232, 20, "#ebd8c8", WINW/2);
+    const isWin=g_state===ST_WIN, isSpare=g_state===ST_SPARE;
+    const big = isWin ? "胜  利 ！" : (isSpare ? "饶  恕" : "GAME OVER");
+    outlineText(big, 0, 150, 56, isWin?"#ffeb5a":(isSpare?"#8fe0ff":"#ff4646"), WINW/2);
+    const flavor = isWin
+      ? `${Boss().name}被打倒了，混沌暂时散去……`
+      : isSpare
+        ? `${Boss().name}安静地睡着了……（饶恕不算胜利，也没有战利品）`
+        : (net.role ? "两个人都倒下了……再试一次？" : "但你还有机会——重新挑战，或者换个对手。");
+    outlineText(flavor, 0, 232, 20, isSpare?"#cfe9ff":"#ebd8c8", WINW/2);
+    if (isSpare){
+      const it=ITEMS[g_boss];
+      outlineText(`卡牌下方已记下「☮ 饶恕」${it?"　·　"+it.name+" 没有掉落":""}`, 0, 274, 15, "#8fe0ff", WINW/2, false);
+    }
     let tipY = 330;
     if (g_state===ST_WIN && g_lastDrop){
       const it=ItemByKey(g_lastDrop);
@@ -3572,7 +3607,7 @@ function Render(){
   ctx.drawImage(GetCrt(), 0, 0, WINW, WINH);
 
   // ---- 暂停按钮（战斗中右上角；联机时所有人都能开面板）
-  if (g_state>=ST_INTRO && g_state!==ST_WIN && g_state!==ST_LOSE){
+  if (g_state>=ST_INTRO && g_state!==ST_WIN && g_state!==ST_LOSE && g_state!==ST_SPARE){
     btnPause();
   }
 
