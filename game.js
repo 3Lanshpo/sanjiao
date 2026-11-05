@@ -1251,7 +1251,12 @@ function UseGear(key, after){
 function useSkill(after){
   const sk = mySkill();
   if (!sk) return;
-  if (skillLeft()<=0){ setToast(`${sk.name}：本局已经用过了`, "#ff9a9a"); return; }
+  if (skillLeft()<=0){                            // 已经用掉：仍然算一次行动（白费一回合）
+    setToast(`${sk.name}：本局已经用过了，白白浪费一回合`, "#ff9a9a");
+    g_actionKind="skill"; g_actionDmg=0;
+    StartDialog(`${sk.name} 本局已经用过了……这一回合白白浪费掉了。`, after);
+    return;
+  }
   g_skillUse++;
   playSfx("snd_menu_select");
   if (sk.dmg>0){                                  // 有伤害的：原地挥一刀
@@ -1276,12 +1281,11 @@ function useSkill(after){
 }
 function DoPlayerAction(){
   const B = Boss();
-  const after = net.role ? ST_WAIT : ST_MENU;    // 联机：行动结束后要跟队友对表
+  // 行动结束的去向：一律走 AfterAction（单人=对手台词→弹幕回合；联机=先跟队友对表）
+  // 技能/ACT/道具都算消耗一回合，不再回到指令菜单
+  const after = ST_WAIT;
   if (g_sub===SM_ACT){
-    if (g_subSel===0){
-      if (skillLeft()<=0){ setToast(`${mySkill().name}：本局已经用过了`, "#ff9a9a"); return; }   // 不消耗行动，留在菜单
-      useSkill(after); g_sub=SM_NONE; return;
-    }
+    if (g_subSel===0){ useSkill(after); g_sub=SM_NONE; return; }   // 用过也要消耗一回合
     if (g_subSel===1){ StartDialog(B.check, after); }
     else {
       g_pacify++;
@@ -3482,7 +3486,7 @@ function Render(){
       }
       if (g_sub===SM_ACT){
         const note = skillLeft()>0 ? `★ 每局一次 · 消耗一回合行动`
-                                   : `★ 本局已经用掉了 —— 换别的行动吧`;
+                                   : `★ 本局已用掉 · 再点只会白白消耗一回合`;
         outlineText(note, BOX_X0+44, BOX_Y0+9, 11,
                     skillLeft()>0?"rgba(160,185,225,0.78)":"rgba(255,150,150,0.85)", -1, false);
       }
