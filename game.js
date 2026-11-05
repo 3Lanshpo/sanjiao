@@ -22,7 +22,8 @@ const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_FIGHT=5, ST_DMG=6, ST_DIALOG=7, ST_ATTACK=8, ST_WIN=9, ST_LOSE=10,
       ST_WAIT=11,                     // 联机：我已出刀，等队友出刀
       ST_CREATE=12,                   // 首次进入：起名 + 设密码 + 选外貌
-      ST_LOGIN=13;                    // 登录：用户名 + 密码 → 回到对应存档
+      ST_LOGIN=13,                    // 登录：用户名 + 密码 → 回到对应存档
+      ST_SETPWD=14;                   // 给当前存档补设 / 修改密码（老存档没密码时用）
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
 
 // 招式
@@ -152,6 +153,8 @@ let g_backup = null;          // 从登录页点「新建存档」前的账号�
 let g_nameBlink = 0;
 // 登录页状态
 let g_login = { user:"", pwd:"", sel:0, err:"", lock:false };
+// 设密码页状态（给无密码的老存档补一个 / 改密码）
+let g_setpwd = { pwd:"", pwd2:"", sel:0, err:"", ok:"" };
 
 // ---------------- 账号（一个浏览器可存多份存档） ----------------
 // 新存档 = 名字 + 密码 + 外貌 + 通关记录；进去要登录。
@@ -1894,7 +1897,7 @@ function vpadHit(x,y){                           // 命中的按键 id
   return null;
 }
 function pressBack(){                            // B：返回 / 取消
-  if (g_state===ST_CREATE || g_state===ST_LOGIN){ pressKey("x"); return; }
+  if (g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD){ pressKey("x"); return; }
   if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
   if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
   if (net.invite){ netDeclineInvite(); return; }
@@ -1933,6 +1936,19 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
       if (!g_login.lock && g_accountKey){ hideInput(); playSfx("snd_menu_move"); GoTitle(); }
       else g_login.err = "要先登录才能进";
     }
+    return;
+  }
+  // ---- 给存档设密码
+  if (g_state===ST_SETPWD){
+    if (vk==="ArrowUp" || vk==="ArrowDown"){
+      g_setpwd.sel = 1 - g_setpwd.sel; g_setpwd.err = "";
+      if (g_setpwd.sel===0) setInputMode("setPwd",  g_setpwd.pwd,  16, true);
+      else                  setInputMode("setPwd2", g_setpwd.pwd2, 16, true);
+      focusInput();
+      playSfx("snd_menu_move");
+    }
+    if (vk==="z"||vk==="Enter") doSetPwd();
+    if (vk==="x"||vk==="Escape"){ hideInput(); g_inputMode=""; playSfx("snd_menu_move"); GoTitle(); }
     return;
   }
   // ---- 首次进入：起名 / 设密码 / 选外貌
@@ -2434,7 +2450,7 @@ function drawFighters(){
   }
 }
 function drawAvatar(){
-  if (!AVATAR.on || g_state===ST_CREATE || g_state===ST_LOGIN) return;
+  if (!AVATAR.on || g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD) return;
   const p=AVATAR.pad, x=AVATAR.x-p, y=AVATAR.y-p;
   const w=AVATAR.w+p*2, h=AVATAR.h+p*2;
   ctx.save();
@@ -2455,7 +2471,7 @@ function setInputMode(mode, value, maxLen, force){
   if (!nameIn) return;
   if (g_inputMode === mode && !force) return;
   g_inputMode = mode;
-  nameIn.type = (mode==="loginPwd" || mode==="createPwd") ? "password" : "text";
+  nameIn.type = (mode==="loginPwd" || mode==="createPwd" || mode==="setPwd" || mode==="setPwd2") ? "password" : "text";
   nameIn.maxLength = maxLen || (mode==="name"||mode==="loginUser" ? 12 : 16);
   nameIn.value = value || "";
 }
@@ -2485,14 +2501,17 @@ if (nameIn){
     if (g_inputMode==="loginUser")       g_login.user = v.slice(0,12);
     else if (g_inputMode==="loginPwd")   g_login.pwd  = v.slice(0,16);
     else if (g_inputMode==="createPwd")  g_createPwd = v.slice(0,16);
+    else if (g_inputMode==="setPwd")     g_setpwd.pwd  = v.slice(0,16);
+    else if (g_inputMode==="setPwd2")    g_setpwd.pwd2 = v.slice(0,16);
     else                                 g_createName = v.slice(0,12);
-    g_login.err = ""; g_createErr = "";
+    g_login.err = ""; g_createErr = ""; g_setpwd.err = "";
   });
   nameIn.addEventListener("keydown", e=>{
     e.stopPropagation();                      // 打字别触发游戏按键
     if (e.key==="Enter"){
       e.preventDefault();
       if (g_inputMode==="loginUser" || g_inputMode==="loginPwd") doLogin();
+      else if (g_inputMode==="setPwd" || g_inputMode==="setPwd2") doSetPwd();
       else if (g_inputMode==="createPwd") createConfirmPwd();
       else createConfirmName();
     } else if (e.key==="Escape"){ e.preventDefault(); nameIn.blur(); }
@@ -2502,11 +2521,33 @@ if (nameIn){
 
 // ---- 登录 / 账号切换 ----
 function openLogin(prefillUser, lock){
-  g_login = { user: prefillUser||"", pwd:"", sel: prefillUser?1:0, err:"", lock: !!lock };
+  g_login = { user: prefillUser||"", pwd:"", sel: prefillUser?1:0, err:"", lock: !!lock,
+              wipeAsk:false, wipeT:0 };
   g_inputMode = "";                            // 强制下一次渲染重建输入框
   g_state = ST_LOGIN; g_stateT = 0;
   Say(""); BgmStop(); crtDirty = true;
   if (!isTouch) setTimeout(()=>focusInput(), 60);
+}
+function askWipePwd(){                          // 两步确认后清掉本机密码（存档本身不删）
+  const now = performance.now();
+  if (!g_login.wipeAsk || now - g_login.wipeT > 6000){
+    g_login.wipeAsk = true; g_login.wipeT = now;
+    g_login.err = "";
+    playSfx("snd_menu_move");
+    return;
+  }
+  const u = g_accountKey || g_login.user;
+  const accounts = loadAccounts();
+  if (!accounts[u]){ g_login.err = "存档读不出来"; g_login.wipeAsk = false; return; }
+  accounts[u].pwd = "";
+  saveAccounts(accounts);
+  g_profile.pwd = "";
+  g_login.wipeAsk = false;
+  hideInput();
+  applyAccount(u);
+  playSfx("snd_menu_select");
+  Say("");
+  GoTitle();
 }
 function doLogin(){
   const u = (g_login.user||"").replace(/\s+/g," ").trim().slice(0,12);
@@ -2527,6 +2568,36 @@ function newAccountFromLogin(){
   g_backup = { key: g_accountKey, prof: JSON.parse(JSON.stringify(g_profile)) };
   g_accountKey = ""; g_profile = { name:"", skin:-1, cleared:[false,false,false,false], pwd:"" };
   openCreate(true);
+}
+
+// ---- 给存档设密码（老存档迁移过来时 pwd 为空，就是靠这里补上） ----
+function openSetPwd(){
+  if (!g_accountKey) return false;
+  g_setpwd = { pwd:"", pwd2:"", sel:0, err:"", ok:"" };
+  g_inputMode = "";
+  g_state = ST_SETPWD; g_stateT = 0;
+  Say(""); BgmStop(); crtDirty = true;
+  if (!isTouch) setTimeout(()=>focusInput(), 60);
+  return true;
+}
+function doSetPwd(){
+  const a = (nameIn && g_inputMode==="setPwd")  ? nameIn.value : g_setpwd.pwd;
+  const b = (nameIn && g_inputMode==="setPwd2") ? nameIn.value : g_setpwd.pwd2;
+  g_setpwd.pwd = (a||"").slice(0,16);
+  g_setpwd.pwd2 = (b||"").slice(0,16);
+  if (g_setpwd.pwd.length < 4){ g_setpwd.err = "密码至少 4 位"; g_setpwd.sel=0; return; }
+  if (g_setpwd.pwd !== g_setpwd.pwd2){ g_setpwd.err = "两次输入不一样，再确认一次"; g_setpwd.sel=1; g_setpwd.pwd2=""; return; }
+  const u = g_accountKey;
+  const accounts = loadAccounts();
+  if (!accounts[u]){ g_setpwd.err = "存档读不出来，回标题重试"; return; }
+  accounts[u].pwd = hashPwd(g_setpwd.pwd);
+  saveAccounts(accounts);
+  g_profile.pwd = accounts[u].pwd;             // 下次启动就会要密码才能进
+  g_setpwd.err = ""; g_setpwd.ok = "密码已保存";
+  hideInput(); g_inputMode = "";
+  playSfx("snd_menu_select");
+  setToast(`存档「${accounts[u].name||u}」已设好密码 —— 下次进入要输它`, "#8ff0b8");
+  setTimeout(()=>{ if (g_state===ST_SETPWD) GoTitle(); }, 900);
 }
 
 function openCreate(fromLogin){
@@ -2710,14 +2781,65 @@ function RenderLogin(){
 
   if (g_login.err) outlineText(g_login.err, 0, 288+VOY, 14, "#ff8a8a", cx, false);
 
-  // 进入 / 新建
-  const bwd = Math.min(168, (WINW-90)/2), gap = 22;
-  btn(cx-bwd-gap/2, 316+VOY, bwd, 44, "进 入", ()=>{ playSfx("snd_menu_select"); doLogin(); });
-  btn(cx+gap/2, 316+VOY, bwd, 44, "新 建 存 档", ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); });
+  // 进入 / 新建 / 给当前存档设密码
+  const bwd = Math.min(150, (WINW-120)/3), gap = 18;
+  const bx0 = cx - (bwd*3+gap*2)/2;
+  btn(bx0,                  316+VOY, bwd, 44, "进 入",       ()=>{ playSfx("snd_menu_select"); doLogin(); });
+  btn(bx0+bwd+gap,          316+VOY, bwd, 44, "新 建 存 档", ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); });
+  const cur = loadAccounts()[g_accountKey];
+  btn(bx0+(bwd+gap)*2,      316+VOY, bwd, 44, (cur && cur.pwd) ? "改 密 码" : "设 密 码",
+      ()=>{ playSfx("snd_menu_select"); if (!openSetPwd()) g_login.err = "先登录一个存档，再给它设密码"; });
 
-  if (g_login.lock) outlineText("请输入这个存档的密码（忘记密码只能新建存档）", 0, 382+VOY, 13, "#8ea2d8", cx, false);
-  else              outlineText(isTouch?"B 返回":"X / ESC 返回", 0, 382+VOY, 13, "#8ea2d8", cx, false);
-  outlineText(isTouch?"↑ ↓ 切换　A 进入":"↑ ↓ 切换　Z 进入", 0, 406+VOY, 13, "#b4d2ff", cx, false);
+  if (g_accountKey && !g_login.lock)
+    outlineText(`当前存档：${g_accountKey}${(cur && cur.pwd) ? "（已设密码）" : "（还没有密码）"}`,
+                0, 372+VOY, 12, (cur && cur.pwd) ? "#8ff0b8" : "#ffd257", cx, false);
+
+  if (g_login.lock) outlineText("输入这个存档的密码才能进入", 0, 394+VOY, 13, "#8ea2d8", cx, false);
+  else              outlineText(isTouch?"B 返回":"X / ESC 返回", 0, 394+VOY, 13, "#8ea2d8", cx, false);
+  outlineText(isTouch?"↑ ↓ 切换　A 进入":"↑ ↓ 切换　Z 进入", 0, 418+VOY, 13, "#b4d2ff", cx, false);
+
+  // 忘记密码的安全出口：清掉本机密码（存档数据不删），免得把自己永久锁在外面
+  if (g_login.lock){
+    outlineText(g_login.wipeAsk ? "再点一次：清除本机密码并进入" : "忘记密码？点这里清除本机密码",
+                0, 442+VOY, 12, g_login.wipeAsk ? "#ff9a9a" : "#7f92c4", cx, false);
+    hot(cx-130, 438+VOY, 260, 18, ()=>{ askWipePwd(); });
+  }
+}
+
+function RenderSetPwd(){
+  const bg0 = img("bg");
+  if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
+  else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
+  const cx = WINW/2;
+  const acc = loadAccounts()[g_accountKey];
+  outlineText("给 存 档 设 密 码", 0, 26+VOY, 42, "#ffec78", cx);
+  outlineText(`存档：${(acc && acc.name) || g_accountKey || "—"}　（设好后每次进入都要输它）`,
+              0, 84+VOY, 14, "#9fb4e8", cx, false);
+
+  const bw = Math.min(420, WINW-80), bx = cx-bw/2, bh = 58;
+  const py1 = 128+VOY, py2 = 216+VOY;
+  const p1 = (nameIn && g_inputMode==="setPwd")  ? nameIn.value : g_setpwd.pwd;
+  const p2 = (nameIn && g_inputMode==="setPwd2") ? nameIn.value : g_setpwd.pwd2;
+  outlineText("新密码（至少 4 位，最多 16）", bx, py1-26, 13, "#b4d2ff", -1, false);
+  loginBox(bx, py1, bw, bh, g_setpwd.sel===0, p1, "新密码", true);
+  outlineText("再输一次", bx, py2-26, 13, "#b4d2ff", -1, false);
+  loginBox(bx, py2, bw, bh, g_setpwd.sel===1, p2, "确认密码", true);
+
+  if (g_setpwd.sel===0) placeInput("setPwd",  p1, bx, py1, bw, bh, 16);
+  else                  placeInput("setPwd2", p2, bx, py2, bw, bh, 16);
+
+  hot(bx, py1, bw, bh, ()=>{ g_setpwd.sel=0; setInputMode("setPwd",  g_setpwd.pwd,  16, true); focusInput(); });
+  hot(bx, py2, bw, bh, ()=>{ g_setpwd.sel=1; setInputMode("setPwd2", g_setpwd.pwd2, 16, true); focusInput(); });
+
+  const msg = g_setpwd.err || g_setpwd.ok;
+  if (msg) outlineText(msg, 0, 288+VOY, 15, g_setpwd.err?"#ff8a8a":"#8ff0b8", cx, false);
+
+  const bwd = Math.min(180, (WINW-100)/2), gap = 24;
+  btn(cx-bwd-gap/2, 316+VOY, bwd, 44, "保 存", ()=>{ playSfx("snd_menu_select"); doSetPwd(); });
+  btn(cx+gap/2, 316+VOY, bwd, 44, "返 回", ()=>{ playSfx("snd_menu_move"); hideInput(); GoTitle(); });
+
+  outlineText("密码只存在这台设备上，忘了就进不去（可以新建存档重来）", 0, 382+VOY, 12, "#8ea2d8", cx, false);
+  outlineText(isTouch?"↑ ↓ 切换　A 保存":"↑ ↓ 切换　Z / Enter 保存　ESC 返回", 0, 406+VOY, 13, "#b4d2ff", cx, false);
 }
 
 // ---- 主界面
@@ -2734,11 +2856,14 @@ function RenderTitle(){
 
   // 账号 / 登录入口（左上角）：新存档带密码，可以在这里换回别的存档
   const lx = VOX+14, ly = VOY+8, lw = 152, lh = 30;
+  const curAcc = loadAccounts()[g_accountKey];
+  const noPwd = !!(g_accountKey && curAcc && !curAcc.pwd);
   roundRect(lx, ly, lw, lh, 8);
   ctx.fillStyle = "rgba(10,8,20,0.55)"; ctx.fill();
-  ctx.strokeStyle = "rgba(160,190,255,0.45)"; ctx.lineWidth = 1.4; ctx.stroke();
-  outlineText(g_profile.name ? `账号 ${g_profile.name} · 登录` : "登录 / 切换账号",
-              0, ly+7, 13, "#cfe0ff", lx+lw/2, false);
+  ctx.strokeStyle = noPwd ? "rgba(255,210,87,0.55)" : "rgba(160,190,255,0.45)";
+  ctx.lineWidth = 1.4; ctx.stroke();
+  outlineText(g_profile.name ? `账号 ${g_profile.name} · ${noPwd ? "设密码" : "登录"}` : "登录 / 切换账号",
+              0, ly+7, 13, noPwd ? "#ffd257" : "#cfe0ff", lx+lw/2, false);
   hot(lx-4, ly-4, lw+8, lh+8, ()=>{ playSfx("snd_menu_move"); openLogin("", false); });
 
   for (let i=0;i<BOSS_N;++i){
@@ -2847,9 +2972,10 @@ function Render(){
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
-  if (g_state!==ST_CREATE && g_state!==ST_LOGIN) hideInput();
+  if (g_state!==ST_CREATE && g_state!==ST_LOGIN && g_state!==ST_SETPWD) hideInput();
   if (g_state===ST_CREATE){ RenderCreate(); drawVPad(); return; }
   if (g_state===ST_LOGIN){ RenderLogin(); drawVPad(); return; }
+  if (g_state===ST_SETPWD){ RenderSetPwd(); drawVPad(); return; }
   if (g_state===ST_TITLE){ RenderTitle(); drawAvatar(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
     const bg0 = img("bg");
