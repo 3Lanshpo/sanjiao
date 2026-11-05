@@ -753,7 +753,7 @@ function netDisband(sendBye){
   const wasWaiting = (g_state===ST_WAIT);        // 正卡在「等队友出刀」→ 队伍没了就别干等
   netRtcClose();                                  // 关掉直连（bye 已经在上面发走了）
   net.role=""; net.partner=""; net.partnerName=""; net.pSkin=undefined; net.teamTopic="";
-  net.px=undefined; net.php=undefined; net.lostSince=0; net.pseen=0; net.pS="";
+  net.px=undefined; net.php=undefined; net.pmh=undefined; net.lostSince=0; net.pseen=0; net.pS="";
   net.myAct=false; net.pAct=false; net.pActPending=false; net.pDead=false;
   net.startNo=0;                                  // 开战序号：队长每开一场 +1，队员按序号去重（重发/重启都靠它）
   net.dpx=undefined; net.dpy=undefined; net.pvx=0; net.pvy=0;
