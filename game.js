@@ -114,7 +114,8 @@ let g_hbMs=45;                                 // 弹幕阶段传心位置的间
 
 // 道具运行时：已用次数（每局/每回合重置）+ 本回合生效的增益 + 刚掉落的道具
 let g_gearUse = { scythe:0, tv:0, fuse:0, guitar:0 };
-let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0 };
+let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0,
+                  weaken:0, regen:0, chill:false };   // 技能：减攻系数 / 药水剩余回合 / 难度回初始
 let g_lastDrop = "";
 let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具生效等）
 
@@ -127,6 +128,20 @@ const CHARS = [
   { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50 },
   { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70 },
 ];
+// ---------------- 角色专属技能（按外貌索引，消耗一回合行动） ----------------
+// 联机：伤害走 act 消息由队长权威扣血；附加效果走 sk 消息，除粗暴砍击外都对队友生效。
+const SKILLS = [
+  { key:"sword", name:"胜利之剑", col:"#ff9ab8",
+    dmg:60,  perTxt:"耗1回合 · 60伤害 · 敌攻-50%",
+    line:"胜利之剑！光刃劈开混沌！（60 伤害，本回合受到的伤害减半）" },
+  { key:"chop",  name:"粗暴砍击", col:"#ffb35a",
+    dmg:110, perTxt:"耗1回合 · 110伤害",
+    line:"粗暴砍击！！（110 伤害）" },
+  { key:"potion",name:"神奇药水", col:"#8fe6a0",
+    dmg:0,   perTxt:"耗1回合 · 3回合×30HP",
+    line:"神奇药水！暖流涌上来……（接下来 3 回合每回合回复 30 HP）" },
+];
+function mySkill(){ return SKILLS[clamp(g_profile.skin|0, 0, SKILLS.length-1)]; }
 // ---------------- 道具（打赢 Boss 掉落） ----------------
 // per:"run" = 整场战斗限次；per:"turn" = 每回合限次（回合切换时恢复）
 const ITEMS = [
@@ -161,6 +176,24 @@ let g_setpwd = { pwd:"", pwd2:"", sel:0, err:"", ok:"" };
 // 老版本的存档没有密码，自动迁移成「无密码账号」，启动时直接进（不弹登录）。
 const ACC_KEY = "sanjiao_accounts_v1";
 const CUR_KEY = "sanjiao_current_v1";
+const DEV_KEY = "sanjiao_device_v1";        // 这台设备已登录过的账号：下次打开直接进，不再问密码
+
+// 同机免登录：登录成功（或刚设好密码）就在本机记一笔。
+// 只认「这台浏览器 + 这个账号」；换账号仍要输密码，清缓存后也会重新要求登录。
+function trustDevice(u){
+  if (!u) return;
+  try { localStorage.setItem(DEV_KEY, JSON.stringify({ u, t: Date.now() })); } catch(e){}
+}
+function isTrustedDevice(u){
+  if (!u) return false;
+  try {
+    const o = JSON.parse(localStorage.getItem(DEV_KEY) || "null");
+    return !!(o && o.u === u);
+  } catch(e){ return false; }
+}
+function clearTrustDevice(){
+  try { localStorage.removeItem(DEV_KEY); } catch(e){}
+}
 
 function hashPwd(s){                        // 本地存档用，不追求密码学强度，只为不存明文
   let h = 2166136261; s = "sj$" + (s||"");
@@ -266,6 +299,7 @@ const net = {
   pTs:0, bTs:0,                                           // 已处理的最新 hb / bf 时间戳（双路去重）
   myAct:false, pAct:false, pActPending:false,              // 本回合：我 / 队友 是否已行动
   actSeen:"",                                              // act 去重键（QoS 重发只算一次）
+  skSeen:"",                                               // 技能附加效果去重键
   pDead:false,                                             // 队友是否已阵亡
   startNo:0,                                               // 开战序号（队长递增 / 队员记录已应用的那个）
   loseAt:0, seenSb:new Set(), lostSince:0, leftAt:0,
@@ -563,12 +597,28 @@ function netTeamMsg(m){
     const key=m.from+":"+m.turn+":"+m.kind;
     if (net.actSeen && net.actSeen===key) return;        // 重发包只算一次（否则队长会重复扣血）
     net.actSeen=key;
-    if (m.kind==="fight") startPAttack(1, (m.dmg|0)>0?"fight":"miss");  // 队友的出刀动作也要看得见
-    if (isLeader() && m.kind==="fight" && m.dmg>0) HitJevil(m.dmg|0);   // 队长权威扣血
+    if (m.kind==="fight" || m.kind==="skill") startPAttack(1, (m.dmg|0)>0?"fight":"miss");  // 队友的出刀动作也要看得见
+    if (isLeader() && (m.kind==="fight" || m.kind==="skill") && m.dmg>0) HitJevil(m.dmg|0);   // 队长权威扣血（技能也一样）
     net.pAct=true;
     // 已经出过刀在等队友 → 开打；已经阵亡（观战）且停在菜单里 → 也要继续推进，
     // 否则死掉的那一方会永远卡在菜单，队长不发 atk，活着的人只能干等
     if (net.myAct && (g_state===ST_WAIT || (g_dead && g_state===ST_MENU))) netBothActed();
+  } else if (m.t==="sk"){                               // 队友放了角色技能 → 附加效果对我也生效
+    if (m.from && m.from===net.cid) return;
+    if (m.turn!==undefined && m.turn!==g_turn) return;
+    const skey="k"+m.from+":"+m.turn+":"+m.k;
+    if (net.skSeen===skey) return;                      // 重发包只算一次
+    net.skSeen=skey;
+    if (m.k==="sword"){
+      g_buff.weaken=0.5;
+      setToast("队友的胜利之剑 —— 本回合受到的伤害 -50%", "#ff9ab8");
+      AddRing(JEV_CX, JEV_CY, 110, 255, 150, 200);
+    } else if (m.k==="potion"){
+      g_buff.regen=Math.max(g_buff.regen,3);
+      g_buff.chill=true;
+      setToast("队友的神奇药水 —— 接下来 3 回合每回合 +30 HP", "#8fe6a0");
+      AddRing(g_heartX, g_heartY, 70, 120, 255, 160);
+    }
   } else if (m.t==="gtr"){                               // 队友弹了电吉他 → 队长这边放宽本回合弹幕
     if (m.turn===undefined || m.turn===g_turn){
       const gk="g"+m.from+":"+m.turn+":"+m.n;            // 重发包只算一次
@@ -940,7 +990,23 @@ function gearRate(){ return g_buff.guitar>0 ? Math.pow(0.5, Math.min(2,g_buff.gu
 function gearMuted(){ return g_buff.guitar>=2; }
 function clearTurnBuffs(){                 // 一个对手回合结束 → 回合制增益全清，吉他次数回满
   g_buff.tv=false; g_buff.fuse=false; g_buff.guitar=0;
+  g_buff.weaken=0; g_buff.chill=false;     // 减攻/降难度只持续本回合
   g_gearUse.guitar=0;
+  tickRegen();                             // 神奇药水：回合结束后结算一次回血
+}
+function tickRegen(){                      // 药水剩余回合数 -1，并回复 30 HP（阵亡不生效）
+  if (!g_buff.regen) return;
+  g_buff.regen--;
+  if (g_dead) return;
+  const before=g_hp;
+  g_hp=Math.min(PLAYER_MAXHP, g_hp+30);
+  const got=Math.round(g_hp-before);
+  if (got>0){
+    AddRing(g_heartX, g_heartY, 52, 120, 255, 160);
+    for (let i=0;i<7;++i)
+      g_sparks.push({x:g_heartX+rnd(-14,14), y:g_heartY+rnd(-14,14), t:0, scale:rnd(0.6,1.1)});
+    g_dmg.push({x:g_heartX, y:g_heartY-24, vy:-42, life:0.9, val:got, miss:false, heal:true});
+  }
 }
 function setToast(txt, col){ g_toast={txt, t:2.2, col:col||"#ffe878"}; }
 function AwardDrop(boss){                  // 打赢/饶恕都算通关，存档记下并掉落道具
@@ -972,7 +1038,7 @@ function ResetGame(){
   const B = Boss();
   g_hp=PLAYER_MAXHP; g_items=3; g_pacify=0; g_turn=0;
   g_gearUse={scythe:0,tv:0,fuse:0,guitar:0};        // 新一场：道具次数回满
-  g_buff={scythe:false,tv:false,fuse:false,guitar:0};
+  g_buff={scythe:false,tv:false,fuse:false,guitar:0,weaken:0,regen:0,chill:false};
   g_lastDrop=""; g_toast=null;
   g_jevHp=B.maxhp; g_jevHpShown=false; g_spareReady=false;
   g_state=ST_INTRO; g_stateT=0; g_sub=SM_NONE; g_btnSel=0;
@@ -1020,7 +1086,7 @@ function SpawnBulletAt(t,x,y,vx,vy,r){
     phase:rnd(0,6.28), life:0, dmg:12});
 }
 function FirePattern(){
-  const ramp = (1.0 + Math.min(1.0, g_turn*0.10)) * gearRate();
+  const ramp = (g_buff.chill ? 1.0 : 1.0 + Math.min(1.0, g_turn*0.10)) * gearRate();
   const pw = Boss().patW;
   if (g_pattern===P_CAROUSEL){
     const rxs=[58,96,128,150], rys=[24,42,54,63];
@@ -1086,6 +1152,7 @@ function HitPlayer(dmg){
     return;
   }
   if (g_buff.fuse) dmg = Math.max(1, Math.round(dmg*0.7));    // 引线：本回合受到的伤害 -30%
+  if (g_buff.weaken>0) dmg = Math.max(1, Math.round(dmg*g_buff.weaken));  // 胜利之剑：本回合敌方伤害减半
   g_hp-=dmg; g_inv=1.0; g_redFlash=0.35;
   AddShake(0.25,5);
   BurstParts(g_heartX,g_heartY,10,130,255,80,110,0.5);
@@ -1176,11 +1243,37 @@ function UseGear(key, after){
   g_actionKind="item"; g_actionDmg=0;
   return "action";
 }
+// 使用角色专属技能（消耗本回合行动）。after = 行动结束后的去向（联机要先等队友）
+function useSkill(after){
+  const sk = mySkill();
+  if (!sk) return;
+  playSfx("snd_menu_select");
+  if (sk.dmg>0){                                  // 有伤害的：原地挥一刀
+    startPAttack(0, "fight");
+    DoAttack(sk.dmg);
+    AddShake(0.2, 4);
+  }
+  if (sk.key==="sword"){
+    g_buff.weaken = 0.5;                          // 本回合敌方造成的伤害 -50%
+    AddRing(JEV_CX, JEV_CY, 130, 255, 150, 200);
+  } else if (sk.key==="potion"){
+    g_buff.regen = Math.max(g_buff.regen, 3);     // 接下来 3 个回合结束各回 30
+    g_buff.chill = true;                          // 本回合难度回到「满血/开局」水平
+    AddRing(g_heartX, g_heartY, 78, 120, 255, 160);
+  }
+  // 联机：除粗暴砍击外，附加效果对队友也生效
+  if (sk.key!=="chop" && net.role)
+    netRtcSend({t:"sk", from:net.cid, turn:g_turn, k:sk.key}, 1, 2);
+  g_actionKind="skill"; g_actionDmg=sk.dmg;
+  if (g_state===ST_WIN || g_jevHp<=0) return;    // 一刀打死了：别再盖掉结算画面
+  StartDialog(sk.line, after);
+}
 function DoPlayerAction(){
   const B = Boss();
   const after = net.role ? ST_WAIT : ST_MENU;    // 联机：行动结束后要跟队友对表
   if (g_sub===SM_ACT){
-    if (g_subSel===0){ StartDialog(B.check, after); }
+    if (g_subSel===0){ useSkill(after); g_sub=SM_NONE; return; }
+    if (g_subSel===1){ StartDialog(B.check, after); }
     else {
       g_pacify++;
       if (g_pacify>=B.actNeed){
@@ -1336,7 +1429,8 @@ function Update(dt){
   case ST_ATTACK: {
     const B = Boss();
     g_stateT+=dt;
-    const ramp = (1.0+Math.min(1.0,g_turn*0.10))*B.patW*gearRate();   // 音波干扰：ramp 越小 → 弹幕越稀
+    // 神奇药水：本回合难度回到「满血/开局」水平（不吃回合数递增）
+    const ramp = (g_buff.chill ? 1.0 : 1.0+Math.min(1.0,g_turn*0.10))*B.patW*gearRate();   // 音波干扰：ramp 越小 → 弹幕越稀
 
     // 红心移动（键盘方向键 / 屏幕方向键都写进同一个 keys）
     let sp = HEART_SPD*dt;
@@ -2073,7 +2167,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     }
     break;
   case ST_SUB: {
-    const n = g_sub===SM_ACT?2 : g_sub===SM_ITEM?itemList().length : 2;
+    const n = g_sub===SM_ACT?3 : g_sub===SM_ITEM?itemList().length : 2;
     if (vk==="ArrowUp"){ g_subSel=(g_subSel+n-1)%n; playSfx("snd_menu_move"); }
     if (vk==="ArrowDown"){ g_subSel=(g_subSel+1)%n; playSfx("snd_menu_move"); }
     if (vk==="x"){ g_state=ST_MENU; g_sub=SM_NONE; playSfx("snd_menu_move"); }
@@ -2558,6 +2652,7 @@ function doLogin(){
   if (!acc){ g_login.err = "没有这个用户名，去「新建存档」吧"; return; }
   if (acc.pwd && acc.pwd !== hashPwd(p)){ g_login.err = "密码不对，再试一次"; g_login.pwd=""; g_inputMode=""; return; }
   if (!applyAccount(u)){ g_login.err = "存档读不出来，再试一次"; return; }
+  trustDevice(u);                              // 这台设备记住你：下次打开不用再输密码
   hideInput();
   playSfx("snd_menu_select");
   Say("");
@@ -2593,6 +2688,7 @@ function doSetPwd(){
   accounts[u].pwd = hashPwd(g_setpwd.pwd);
   saveAccounts(accounts);
   g_profile.pwd = accounts[u].pwd;             // 下次启动就会要密码才能进
+  trustDevice(u);                              // 刚在本机设的密码：这台设备直接免登录
   g_setpwd.err = ""; g_setpwd.ok = "密码已保存";
   hideInput(); g_inputMode = "";
   playSfx("snd_menu_select");
@@ -2653,6 +2749,7 @@ function createChooseSkin(){
   }
   g_accountKey = newKey;
   saveProfile();
+  if (g_profile.pwd) trustDevice(newKey);      // 刚建好的带密码账号：本机免登录
   hideInput();
   net.name = g_profile.name;                   // 组队邀请里显示的就是这个名字
   try { localStorage.setItem("sj_name", net.name); } catch(e){}
@@ -2725,6 +2822,9 @@ function RenderCreate(){
       ctx.lineWidth = sel?3:1.5; ctx.strokeRect(x,y,cw,chh);
       drawCharFrame(i, x+cw/2, y+92+(sel?Math.sin(g_animT*4)*3:0), 104, cw-20);
       outlineText(CHARS[i].label, 0, y+168, 20, sel?"#fff08c":"#d6d2dc", x+cw/2);
+      // 专属技能名（战斗里在 ACT 第一项使用，消耗一回合）
+      outlineText(`★ ${SKILLS[i].name}`, 0, y+190, 12,
+                  sel?"#ffc9d8":"rgba(185,198,222,0.72)", x+cw/2, false);
       hot(x,y,cw,chh, ()=>{ g_createSel=i; playSfx("snd_menu_move"); });
     }
     outlineText(isTouch?"← → 选择　A 确定　B 改名":"← → 选择　Z 确定　X 改名", 0, 352+VOY, 15, "#d2dce1", cx, false);
@@ -3274,12 +3374,14 @@ function Render(){
     ctx.strokeStyle="rgba(240,240,245,1)"; ctx.lineWidth=1.6; ctx.strokeRect(46,byy,110,18);
     outlineText(`${Math.ceil(g_hp)}/${Math.floor(PLAYER_MAXHP)}`, 160, byy-2, 15, "#fff", -1, false);
 
-    // 本回合生效的道具增益（小字贴在 HP 右侧，免得挤占战斗区）
+    // 本回合生效的道具/技能增益（小字贴在 HP 右侧，免得挤占战斗区）
     const bl=[];
     if (g_buff.scythe) bl.push("镰刀待发 ×2");
     if (g_buff.tv) bl.push("电视护盾 30%");
     if (g_buff.fuse) bl.push("引线 -30%");
     if (g_buff.guitar>0) bl.push(`音波 ×${g_buff.guitar}`);
+    if (g_buff.weaken>0) bl.push("剑威 敌攻-50%");
+    if (g_buff.regen>0) bl.push(`药水 ×${g_buff.regen}`);
     if (bl.length) outlineText(bl.join("　"), 272, byy+1, 11, "#8fe6ff", -1, false);
 
     // 战斗菜单四项（常驻显示，用方向键选、A 确认）
@@ -3349,12 +3451,20 @@ function Render(){
                     used?"rgba(160,160,180,0.65)":"#93a8d8", -1, false);
       }
     } else {
-      const opts = g_sub===SM_ACT ? ["检查","安抚"] : ["饶恕","逃跑"];
-      for (let i=0;i<2;++i){
-        const y=BOX_Y0+24+i*42;
-        outlineText(opts[i], BOX_X0+46, y-10, 22, i===g_subSel?"#fff":"#d8c8d2", -1);
+      const sk = mySkill();
+      const opts = g_sub===SM_ACT ? [sk.name,"检查","安抚"] : ["饶恕","逃跑"];
+      const nOpt = opts.length;
+      const step = nOpt>2 ? 38 : 42;
+      for (let i=0;i<nOpt;++i){
+        const y=BOX_Y0+34+i*step;
+        const isSkill = (g_sub===SM_ACT && i===0);
+        const col = isSkill ? (i===g_subSel?sk.col:"rgba(255,255,255,0.78)")
+                            : (i===g_subSel?"#fff":"#d8c8d2");
+        outlineText(opts[i], BOX_X0+44, y-8, isSkill?21:20, col, -1);
         if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
-          drawImg(img("soul"), BOX_X0+26, y, 26,26); ctx.restore(); }
+          drawImg(img("soul"), BOX_X0+24, y-5, 22,22); ctx.restore(); }
+        if (isSkill) outlineText(`★ ${sk.perTxt}`, BOX_X0+178, y-2, 10.5,
+                                 i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)", -1, false);
       }
       if (g_sub===SM_MERCY && g_spareReady){
         const im=img("sparkle");
@@ -3362,7 +3472,7 @@ function Render(){
           drawImg(im, BOX_X1-40, BOX_Y0+30, 36,36, g_animT*160); ctx.restore(); }
         outlineText("!!", BOX_X1-66, BOX_Y0+20, 22, "#ffe65a", -1);
       }
-      outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+12, 15, "#9aa8c8", -1, false);
+      outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+10, 14, "#9aa8c8", -1, false);
     }
     ctx.restore();
   }
@@ -3371,7 +3481,8 @@ function Render(){
   ctx.save(); ctx.translate(VOX,VOY);
   for (const d of g_dmg){
     const a=Math.min(1, d.life*2);
-    outlineText(d.miss?"MISS":String(d.val), d.x, d.y, 34, d.miss?`rgba(180,180,190,${a})`:`rgba(255,235,80,${a})`, d.x);
+    const col = d.miss ? `rgba(180,180,190,${a})` : (d.heal ? `rgba(120,255,170,${a})` : `rgba(255,235,80,${a})`);
+    outlineText(d.miss?"MISS":(d.heal?`+${d.val}`:String(d.val)), d.x, d.y, 34, col, d.x);
   }
   ctx.restore();
 
@@ -3955,10 +4066,10 @@ loadFinishCb = ()=>{
   document.getElementById("loading").style.display="none";
   avatarLayout();
   const ca = currentAccount();
-  if (ca && ca.acc && ca.acc.pwd){
-    openLogin(ca.user, true);                 // 新存档（带密码）：先登录才进得去
+  if (ca && ca.acc && ca.acc.pwd && !isTrustedDevice(ca.user)){
+    openLogin(ca.user, true);                 // 换了设备/清了缓存：先登录才进得去
   } else if (ca && ca.acc){
-    applyAccount(ca.user);                    // 旧存档 / 无密码账号：和以前一样直接进
+    applyAccount(ca.user);                    // 本机已登录过 / 无密码账号：直接进
     GoTitle();
   } else if (g_profile.skin>=0 && g_profile.name){
     GoTitle();                                // 兜底：账号表读不出来但档案还在
