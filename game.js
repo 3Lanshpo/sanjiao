@@ -116,6 +116,7 @@ let g_hbMs=45;                                 // 弹幕阶段传心位置的间
 let g_gearUse = { scythe:0, tv:0, fuse:0, guitar:0 };
 let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0,
                   weaken:0, regen:0, chill:false };   // 技能：减攻系数 / 药水剩余回合 / 难度回初始
+let g_skillUse = 0;            // 角色专属技能本局已用次数（每局一次，ResetGame 清零）
 let g_lastDrop = "";
 let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具生效等）
 
@@ -142,6 +143,8 @@ const SKILLS = [
     line:"神奇药水！暖流涌上来……（接下来 3 回合每回合回复 30 HP）" },
 ];
 function mySkill(){ return SKILLS[clamp(g_profile.skin|0, 0, SKILLS.length-1)]; }
+const SKILL_PER_RUN = 1;                       // 每局只能用一次
+function skillLeft(){ return Math.max(0, SKILL_PER_RUN - g_skillUse); }
 // ---------------- 道具（打赢 Boss 掉落） ----------------
 // per:"run" = 整场战斗限次；per:"turn" = 每回合限次（回合切换时恢复）
 const ITEMS = [
@@ -1038,6 +1041,7 @@ function ResetGame(){
   const B = Boss();
   g_hp=PLAYER_MAXHP; g_items=3; g_pacify=0; g_turn=0;
   g_gearUse={scythe:0,tv:0,fuse:0,guitar:0};        // 新一场：道具次数回满
+  g_skillUse=0;                                     // 新一场：专属技能每局一次，重新可用
   g_buff={scythe:false,tv:false,fuse:false,guitar:0,weaken:0,regen:0,chill:false};
   g_lastDrop=""; g_toast=null;
   g_jevHp=B.maxhp; g_jevHpShown=false; g_spareReady=false;
@@ -1247,6 +1251,8 @@ function UseGear(key, after){
 function useSkill(after){
   const sk = mySkill();
   if (!sk) return;
+  if (skillLeft()<=0){ setToast(`${sk.name}：本局已经用过了`, "#ff9a9a"); return; }
+  g_skillUse++;
   playSfx("snd_menu_select");
   if (sk.dmg>0){                                  // 有伤害的：原地挥一刀
     startPAttack(0, "fight");
@@ -1272,7 +1278,10 @@ function DoPlayerAction(){
   const B = Boss();
   const after = net.role ? ST_WAIT : ST_MENU;    // 联机：行动结束后要跟队友对表
   if (g_sub===SM_ACT){
-    if (g_subSel===0){ useSkill(after); g_sub=SM_NONE; return; }
+    if (g_subSel===0){
+      if (skillLeft()<=0){ setToast(`${mySkill().name}：本局已经用过了`, "#ff9a9a"); return; }   // 不消耗行动，留在菜单
+      useSkill(after); g_sub=SM_NONE; return;
+    }
     if (g_subSel===1){ StartDialog(B.check, after); }
     else {
       g_pacify++;
@@ -2822,8 +2831,8 @@ function RenderCreate(){
       ctx.lineWidth = sel?3:1.5; ctx.strokeRect(x,y,cw,chh);
       drawCharFrame(i, x+cw/2, y+92+(sel?Math.sin(g_animT*4)*3:0), 104, cw-20);
       outlineText(CHARS[i].label, 0, y+168, 20, sel?"#fff08c":"#d6d2dc", x+cw/2);
-      // 专属技能名（战斗里在 ACT 第一项使用，消耗一回合）
-      outlineText(`★ ${SKILLS[i].name}`, 0, y+190, 12,
+      // 专属技能名（战斗里在 ACT 第一项使用，消耗一回合，每局一次）
+      outlineText(`★ ${SKILLS[i].name}·每局1次`, 0, y+190, 11,
                   sel?"#ffc9d8":"rgba(185,198,222,0.72)", x+cw/2, false);
       hot(x,y,cw,chh, ()=>{ g_createSel=i; playSfx("snd_menu_move"); });
     }
@@ -3452,19 +3461,30 @@ function Render(){
       }
     } else {
       const sk = mySkill();
+      const left = skillLeft();
       const opts = g_sub===SM_ACT ? [sk.name,"检查","安抚"] : ["饶恕","逃跑"];
       const nOpt = opts.length;
-      const step = nOpt>2 ? 38 : 42;
+      const step = nOpt>2 ? 34 : 42;
       for (let i=0;i<nOpt;++i){
-        const y=BOX_Y0+34+i*step;
+        const y=BOX_Y0+(nOpt>2?36:34)+i*step;
         const isSkill = (g_sub===SM_ACT && i===0);
-        const col = isSkill ? (i===g_subSel?sk.col:"rgba(255,255,255,0.78)")
-                            : (i===g_subSel?"#fff":"#d8c8d2");
+        const gone = isSkill && left<=0;                       // 本局用过了
+        let col;
+        if (isSkill) col = gone ? (i===g_subSel?"rgba(190,180,190,0.85)":"rgba(150,152,172,0.62)")
+                                : (i===g_subSel?sk.col:"rgba(255,255,255,0.78)");
+        else         col = i===g_subSel?"#fff":"#d8c8d2";
         outlineText(opts[i], BOX_X0+44, y-8, isSkill?21:20, col, -1);
         if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
           drawImg(img("soul"), BOX_X0+24, y-5, 22,22); ctx.restore(); }
-        if (isSkill) outlineText(`★ ${sk.perTxt}`, BOX_X0+178, y-2, 10.5,
-                                 i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)", -1, false);
+        if (isSkill) outlineText(gone ? "本局已用掉" : `★ ${sk.perTxt}`, BOX_X0+178, y-2, 10.5,
+                                 gone ? "rgba(160,160,180,0.7)"
+                                      : (i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)"), -1, false);
+      }
+      if (g_sub===SM_ACT){
+        const note = skillLeft()>0 ? `★ 每局一次 · 消耗一回合行动`
+                                   : `★ 本局已经用掉了 —— 换别的行动吧`;
+        outlineText(note, BOX_X0+44, BOX_Y0+9, 11,
+                    skillLeft()>0?"rgba(160,185,225,0.78)":"rgba(255,150,150,0.85)", -1, false);
       }
       if (g_sub===SM_MERCY && g_spareReady){
         const im=img("sparkle");
