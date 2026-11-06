@@ -122,10 +122,10 @@ let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0,
 let g_skillUse = 0;            // 角色专属技能本局已用次数（每局一次，ResetGame 清零）
 
 // ---------------- 我的房间（空房间：白墙 + 木地板，角色用原版 overworld 走路帧） ----------------
-const ROOM_WALL_Y   = 214;                  // 白墙与木地板的分界
-const ROOM_FLOOR_TOP= 268;                  // 脚底能走到的最上沿
-const ROOM_FLOOR_BOT= WINH-38;              // 脚底能走到的最下沿
-const ROOM_SPD      = 145;                  // 房间里的移动速度（像素/秒）
+const ROOM_WALL_Y   = 96;                   // 白墙与木地板的分界（宝可梦视角：墙只占上面一窄条）
+const ROOM_FLOOR_TOP= 132;                  // 脚底能走到的最上沿（头可以稍微探进墙里，3/4 视角）
+const ROOM_FLOOR_BOT= WINH-30;              // 脚底能走到的最下沿
+const ROOM_SPD      = 170;                  // 房间里的移动速度（像素/秒）
 let g_room = { x:WINW/2, y:Math.round(WINH*0.78), face:1, t:0, moving:false };
 let g_lastDrop = "";
 let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具生效等）
@@ -3045,20 +3045,24 @@ function RenderRoom(){
   wg.addColorStop(0,"rgba(255,255,255,0.55)");
   wg.addColorStop(1,"rgba(206,200,186,0.30)");
   ctx.fillStyle=wg; ctx.fillRect(0,0,WINW,ROOM_WALL_Y);
+  for (let x=0; x<WINW; x+=32){                 // 淡淡的墙纸竖条纹
+    ctx.fillStyle="rgba(190,182,166,0.18)"; ctx.fillRect(x,0,16,ROOM_WALL_Y-14);
+  }
   // 踢脚线
   ctx.fillStyle="#e8e3d8"; ctx.fillRect(0,ROOM_WALL_Y-14,WINW,14);
   ctx.fillStyle="rgba(120,104,84,0.35)"; ctx.fillRect(0,ROOM_WALL_Y-2,WINW,2);
   // 木地板
   ctx.fillStyle="#a9713e"; ctx.fillRect(0,ROOM_WALL_Y,WINW,WINH-ROOM_WALL_Y);
-  const plank=13;                              // 小块正方形地板：房间显得更大
+  const plank=40;                              // 40px 正方形瓷砖，格子对齐（宝可梦式）
   for (let row=0, y=ROOM_WALL_Y; y<WINH; y+=plank, row++){
-    ctx.fillStyle="rgba(255,228,186,0.10)"; ctx.fillRect(0,y+1,WINW,plank-2);   // 板面高光
-    ctx.fillStyle="rgba(92,56,26,0.30)";    ctx.fillRect(0,y,WINW,1);            // 横向缝
-    const off=(row%2)?(plank/2|0):0;                                             // 每行错开半格
-    for (let x=-off; x<WINW; x+=plank){
-      ctx.fillStyle="rgba(92,56,26,0.16)"; ctx.fillRect(x,y+1,1,plank-1);        // 竖向缝
+    if (row%2) { ctx.fillStyle="rgba(255,232,196,0.08)"; ctx.fillRect(0,y,WINW,plank); } // 隔行微调明暗
+    for (let x=0; x<WINW; x+=plank){
+      if ((row+(x/plank|0))%2){ ctx.fillStyle="rgba(255,236,204,0.05)"; ctx.fillRect(x,y,plank,plank); } // 象棋格微差
     }
-    ctx.fillStyle="rgba(255,235,200,0.05)"; ctx.fillRect(0,y+plank*0.55,WINW,1); // 木纹
+    ctx.fillStyle="rgba(88,52,22,0.34)";    ctx.fillRect(0,y,WINW,2);            // 横向缝
+    for (let x=0; x<WINW; x+=plank){
+      ctx.fillStyle="rgba(88,52,22,0.22)"; ctx.fillRect(x,y,2,plank);            // 竖向缝
+    }
   }
   // 墙脚投在地板上的阴影
   const fg=ctx.createLinearGradient(0,ROOM_WALL_Y,0,ROOM_WALL_Y+26);
@@ -3067,7 +3071,7 @@ function RenderRoom(){
 
   // 角色影子
   ctx.fillStyle="rgba(70,42,18,0.20)";
-  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-2, 13, 4, 0, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-2, 24, 7, 0, 0, 6.29); ctx.fill();
 
   // 角色：站着用原版 overworld 站立图（正面），走动用原版 overworld 跑步帧（侧面）
   const c = CHARS[mySkin()] || CHARS[0];
@@ -3080,7 +3084,7 @@ function RenderRoom(){
   else { im=img(c.img); frames=c.frames; f=Math.floor(g_animT*7)%frames; }
   if (im && im.naturalWidth){
     const fw=im.naturalWidth/frames, fh=im.naturalHeight;
-    const sc=0.5;                               // 镜头再拉远：视野更宽，房间显得更大
+    const sc=1;                                 // 宝可梦式比例：角色约 2 格高
     const bob = walking ? Math.abs(Math.sin(g_room.t*Math.PI*4.5))*2 : 0;
     ctx.save();
     ctx.imageSmoothingEnabled=false;
