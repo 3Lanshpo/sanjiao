@@ -3067,7 +3067,7 @@ function RenderRoom(){
 
   // 角色影子
   ctx.fillStyle="rgba(70,42,18,0.20)";
-  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-3, 32, 9, 0, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-2, 22, 6, 0, 0, 6.29); ctx.fill();
 
   // 角色：站着用原版 overworld 站立图（正面），走动用原版 overworld 跑步帧（侧面）
   const c = CHARS[mySkin()] || CHARS[0];
@@ -3080,7 +3080,7 @@ function RenderRoom(){
   else { im=img(c.img); frames=c.frames; f=Math.floor(g_animT*7)%frames; }
   if (im && im.naturalWidth){
     const fw=im.naturalWidth/frames, fh=im.naturalHeight;
-    const sc=2;                                 // 整数倍放大，像素不糊
+    const sc=1;                                 // 镜头拉远：原版游戏内的实际大小
     const bob = walking ? Math.abs(Math.sin(g_room.t*Math.PI*4.5))*2 : 0;
     ctx.save();
     ctx.imageSmoothingEnabled=false;
