@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261106c";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261106d";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -1116,7 +1116,8 @@ function GoRoom(){
   g_state=ST_ROOM; g_stateT=0;
   g_room.x=WINW/2; g_room.y=Math.round(WINH*0.78);
   g_room.face=1; g_room.t=0; g_room.moving=false;
-  g_bullets=[]; g_dmg=[]; g_sparks=[]; Say(""); BgmStop();
+  g_bullets=[]; g_dmg=[]; g_sparks=[]; Say("");
+  BgmStop(); BgmStart("assets/bgm_verdanturf.mp3");   // 房间 BGM：宝可梦绿宝石 绿茵市
 }
 function StartBattle(boss){
   g_boss=boss; ResetGame();
