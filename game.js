@@ -25,6 +25,8 @@ const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_LOGIN=13,                    // 登录：用户名 + 密码 → 回到对应存档
       ST_SETPWD=14,                   // 给当前存档补设 / 修改密码（老存档没密码时用）
       ST_SPARE=15;                    // 饶恕结算：不是胜利、不掉道具，只在卡牌下标「饶恕」
+// 我的房间：独立场景，不参与战斗状态机。用负数，避免命中所有 g_state>=ST_INTRO 的战斗判断
+const ST_ROOM=-1;
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
 
 // 招式
@@ -118,6 +120,13 @@ let g_gearUse = { scythe:0, tv:0, fuse:0, guitar:0 };
 let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0,
                   weaken:0, regen:0, chill:false };   // 技能：减攻系数 / 药水剩余回合 / 难度回初始
 let g_skillUse = 0;            // 角色专属技能本局已用次数（每局一次，ResetGame 清零）
+
+// ---------------- 我的房间（空房间：白墙 + 木地板，角色用原版 overworld 走路帧） ----------------
+const ROOM_WALL_Y   = 214;                  // 白墙与木地板的分界
+const ROOM_FLOOR_TOP= 268;                  // 脚底能走到的最上沿
+const ROOM_FLOOR_BOT= WINH-38;              // 脚底能走到的最下沿
+const ROOM_SPD      = 170;                  // 房间里的移动速度（像素/秒）
+let g_room = { x:WINW/2, y:Math.round(WINH*0.78), face:1, t:0, moving:false };
 let g_lastDrop = "";
 let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具生效等）
 
@@ -130,7 +139,7 @@ const CHARS = [
   { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6, atk:"atk_kris",   atkN:7, atkS:1.00,
     spd:1.20, dmg:1.00, maxhp:120, passive:"移动速度 +20%" },
   { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50,
-    spd:1.00, dmg:1.10, maxhp:120, passive:"造成伤害 +10%" },
+    spd:1.00, dmg:1.20, maxhp:120, passive:"造成伤害 +20%" },
   { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70,
     spd:1.00, dmg:1.00, maxhp:150, passive:"血量上限 150" },
 ];
@@ -938,7 +947,7 @@ const IMG_LIST = ["bg","jevil","soul","spade","diamond","club","knife","boom","s
 for (let i=0;i<8;i++){ IMG_LIST.push("jevil_jump_"+i); IMG_LIST.push("jevil_hurt_"+i); }
 for (let i=0;i<8;i++){ IMG_LIST.push("tenna_"+i); IMG_LIST.push("neo_"+i); IMG_LIST.push("pink_"+i); }
 for (let i=0;i<4;i++){ IMG_LIST.push("spamton_"+i); }
-for (const c of CHARS){ IMG_LIST.push(c.img); IMG_LIST.push(c.atk); }   // 待机 + 原版挥刀
+for (const c of CHARS){ IMG_LIST.push(c.img); IMG_LIST.push(c.atk); IMG_LIST.push("walk_"+c.key); IMG_LIST.push("idle_"+c.key); }   // 待机 + 挥刀 + 原版 overworld 站立/走路
 
 const SFX = {};
 const SFX_LIST = ["snd_menu_move","snd_menu_select","snd_slash"];
@@ -1101,6 +1110,12 @@ function GoTitle(){
   g_bullets=[]; g_dmg=[]; g_sparks=[];
   Say(""); BgmStop();
   if (isLeader()) netPubRetry(net.teamTopic, {t:"st", from:net.cid, s:ST_TITLE}, 3);
+}
+function GoRoom(){
+  g_state=ST_ROOM; g_stateT=0;
+  g_room.x=WINW/2; g_room.y=Math.round(WINH*0.78);
+  g_room.face=1; g_room.t=0; g_room.moving=false;
+  g_bullets=[]; g_dmg=[]; g_sparks=[]; Say(""); BgmStop();
 }
 function StartBattle(boss){
   g_boss=boss; ResetGame();
@@ -1474,6 +1489,26 @@ function Update(dt){
   case ST_TITLE:
     g_stateT+=dt;
     break;
+  case ST_ROOM: {                     // 我的房间：方向键 / WASD / 屏幕方向键都能走
+    g_stateT+=dt;
+    let dx=0, dy=0;
+    if (keys.has("ArrowLeft")||keys.has("a")||keys.has("A"))  dx-=1;
+    if (keys.has("ArrowRight")||keys.has("d")||keys.has("D")) dx+=1;
+    if (keys.has("ArrowUp")||keys.has("w")||keys.has("W"))    dy-=1;
+    if (keys.has("ArrowDown")||keys.has("s")||keys.has("S"))  dy+=1;
+    if (dx||dy){
+      const len=Math.hypot(dx,dy)||1;
+      g_room.x += dx/len*ROOM_SPD*dt;
+      g_room.y += dy/len*ROOM_SPD*dt*0.72;      // 俯视：上下走得慢一点
+      if (dx) g_room.face = dx>0?1:-1;
+      g_room.moving=true; g_room.t += dt;
+    } else {
+      g_room.moving=false; g_room.t = 0;        // 站住就回到第 0 帧（原版站立姿势）
+    }
+    g_room.x=clamp(g_room.x, 70, WINW-70);
+    g_room.y=clamp(g_room.y, ROOM_FLOOR_TOP, ROOM_FLOOR_BOT);
+    break;
+  }
   case ST_PAUSE:
     break;                       // 完全冻结（与 C++ 版一致：暂停不推进计时）
   case ST_ATTACK: {
@@ -2041,6 +2076,7 @@ function vpadHit(x,y){                           // 命中的按键 id
   return null;
 }
 function pressBack(){                            // B：返回 / 取消
+  if (g_state===ST_ROOM){ pressKey("x"); return; }
   if (g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD){ pressKey("x"); return; }
   if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
   if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
@@ -2178,9 +2214,15 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     if (net.invSent){ Say("等待对方回应…"); return; }
   }
   if (vk==="x" && net.invite){ netDeclineInvite(); return; }     // 拒绝邀请
+  // ---- 我的房间：只认返回（走路靠 keys 按住）
+  if (g_state===ST_ROOM){
+    if (vk==="Escape"||vk==="x"||vk==="b"){ playSfx("snd_menu_move"); GoTitle(); }
+    return;
+  }
   // ---- 主界面
   if (g_state===ST_TITLE){
     if (isMember()) return;                                      // 队员不能操作主界面
+    if (vk==="r"){ playSfx("snd_menu_select"); net.selIdx=0; GoRoom(); return; }
     if (vk==="ArrowLeft"){ g_bossSel=(g_bossSel+BOSS_N-1)%BOSS_N; playSfx("snd_menu_move"); }
     if (vk==="ArrowRight"){ g_bossSel=(g_bossSel+1)%BOSS_N; playSfx("snd_menu_move"); }
     if (vk==="z"||vk==="Enter"){ playSfx("snd_menu_select"); net.selIdx=0; StartBattle(g_bossSel); }
@@ -2994,6 +3036,65 @@ function RenderSetPwd(){
   outlineText(isTouch?"↑ ↓ 切换　A 保存":"↑ ↓ 切换　Z / Enter 保存　ESC 返回", 0, 412+VOY, 13, "#b4d2ff", cx, false);
 }
 
+
+// ---- 我的房间（空房间：白墙 + 木地板，角色用原版 overworld 走路帧）
+function RenderRoom(){
+  // 白墙
+  ctx.fillStyle="#f3f0e8"; ctx.fillRect(0,0,WINW,ROOM_WALL_Y);
+  const wg=ctx.createLinearGradient(0,0,0,ROOM_WALL_Y);
+  wg.addColorStop(0,"rgba(255,255,255,0.55)");
+  wg.addColorStop(1,"rgba(206,200,186,0.30)");
+  ctx.fillStyle=wg; ctx.fillRect(0,0,WINW,ROOM_WALL_Y);
+  // 踢脚线
+  ctx.fillStyle="#e8e3d8"; ctx.fillRect(0,ROOM_WALL_Y-14,WINW,14);
+  ctx.fillStyle="rgba(120,104,84,0.35)"; ctx.fillRect(0,ROOM_WALL_Y-2,WINW,2);
+  // 木地板
+  ctx.fillStyle="#a9713e"; ctx.fillRect(0,ROOM_WALL_Y,WINW,WINH-ROOM_WALL_Y);
+  const plank=18;
+  for (let row=0, y=ROOM_WALL_Y; y<WINH; y+=plank, row++){
+    ctx.fillStyle="rgba(255,228,186,0.10)"; ctx.fillRect(0,y+2,WINW,plank-4);   // 板面高光
+    ctx.fillStyle="rgba(92,56,26,0.30)";    ctx.fillRect(0,y,WINW,2);            // 横向板缝
+    const off=(row%2)?110:0;
+    for (let x=-off; x<WINW; x+=220){
+      ctx.fillStyle="rgba(92,56,26,0.16)"; ctx.fillRect(x,y+2,2,plank-2);        // 交错竖缝
+    }
+    ctx.fillStyle="rgba(255,235,200,0.06)"; ctx.fillRect(0,y+plank*0.55,WINW,1); // 木纹
+  }
+  // 墙脚投在地板上的阴影
+  const fg=ctx.createLinearGradient(0,ROOM_WALL_Y,0,ROOM_WALL_Y+26);
+  fg.addColorStop(0,"rgba(60,38,18,0.22)"); fg.addColorStop(1,"rgba(60,38,18,0)");
+  ctx.fillStyle=fg; ctx.fillRect(0,ROOM_WALL_Y,WINW,26);
+
+  // 角色影子
+  ctx.fillStyle="rgba(70,42,18,0.20)";
+  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-3, 32, 9, 0, 0, 6.29); ctx.fill();
+
+  // 角色：站着用原版 overworld 站立图（正面），走动用原版 overworld 跑步帧（侧面）
+  const c = CHARS[mySkin()] || CHARS[0];
+  const walkIm = img("walk_"+c.key), idleIm = img("idle_"+c.key);
+  const walking = !!(g_room.moving && walkIm);
+  let im, frames, f, isIdle=false;
+  if (walking){ im=walkIm; frames=6; f=(2+Math.floor(g_room.t*9))%frames; }
+  else if (idleIm){ im=idleIm; frames=1; f=0; isIdle=true; }
+  else if (walkIm){ im=walkIm; frames=6; f=2; }
+  else { im=img(c.img); frames=c.frames; f=Math.floor(g_animT*7)%frames; }
+  if (im && im.naturalWidth){
+    const fw=im.naturalWidth/frames, fh=im.naturalHeight;
+    const sc=2;                                 // 整数倍放大，像素不糊
+    const bob = walking ? Math.abs(Math.sin(g_room.t*Math.PI*4.5))*2 : 0;
+    ctx.save();
+    ctx.imageSmoothingEnabled=false;
+    ctx.translate(g_room.x, g_room.y-bob);
+    ctx.scale((isIdle?1:g_room.face)*sc, sc);   // 站立图是正面，不翻转
+    ctx.drawImage(im, f*fw, 0, fw, fh, -fw/2, -fh, fw, fh);
+    ctx.restore();
+  }
+
+  // 底部提示
+  outlineText("方向键 / WASD 走路　·　ESC / B 回主界面", 0, WINH-26, 13,
+              "rgba(250,244,232,0.92)", WINW/2, false);
+}
+
 // ---- 主界面
 function RenderTitle(){
   ctx.fillStyle = "rgb(12,8,22)";
@@ -3017,6 +3118,14 @@ function RenderTitle(){
   outlineText(g_profile.name ? `账号 ${g_profile.name} · ${noPwd ? "设密码" : "登录"}` : "登录 / 切换账号",
               0, ly+7, 13, noPwd ? "#ffd257" : "#cfe0ff", lx+lw/2, false);
   hot(lx-4, ly-4, lw+8, lh+8, ()=>{ playSfx("snd_menu_move"); openLogin("", false); });
+
+  // 我的房间（空房间，进去看看自己选的角色）
+  const ry0 = ly+38;
+  roundRect(lx, ry0, lw, lh, 8);
+  ctx.fillStyle="rgba(10,8,20,0.55)"; ctx.fill();
+  ctx.strokeStyle="rgba(255,214,120,0.5)"; ctx.lineWidth=1.4; ctx.stroke();
+  outlineText(isTouch ? "我的房间" : "我的房间 · R", 0, ry0+7, 13, "#ffe9a8", lx+lw/2, false);
+  hot(lx-4, ry0-4, lw+8, lh+8, ()=>{ playSfx("snd_menu_move"); net.selIdx=0; GoRoom(); });
 
   for (let i=0;i<BOSS_N;++i){
     const x=VOX+34+i*146, y=VOY+118, w=132, h=214;
@@ -3133,6 +3242,7 @@ function Render(){
   if (g_state===ST_CREATE){ RenderCreate(); drawVPad(); return; }
   if (g_state===ST_LOGIN){ RenderLogin(); drawVPad(); return; }
   if (g_state===ST_SETPWD){ RenderSetPwd(); drawVPad(); return; }
+  if (g_state===ST_ROOM){ RenderRoom(); drawVPad(); return; }
   if (g_state===ST_TITLE){ RenderTitle(); drawAvatar(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
     const bg0 = img("bg");
