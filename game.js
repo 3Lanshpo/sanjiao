@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261106d";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261107a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -984,14 +984,19 @@ function playSfx(n){
 // BGM
 const bgm = new Audio();
 bgm.loop = true; bgm.preload = "auto";
-let bgmName = "";
+let bgmName = "", bgmWant = "";             // bgmWant：想放的曲子（被浏览器拦了自动播放时留着，一有操作就补放）
 function BgmStart(file){
   const src = ASSET(file);
   if (bgmName === src && !bgm.paused) return;
-  bgmName = src; bgm.src = src; bgm.volume = g_vol/100;
-  bgm.play().catch(()=>{});
+  bgmName = src; bgmWant = src; bgm.src = src; bgm.volume = g_vol/100;
+  bgm.play().catch(()=>{});                   // 手机/Safari 没操作过会被拒，交给 TryResumeBgm
 }
-function BgmStop(){ bgm.pause(); bgmName=""; }
+function BgmStop(){ bgm.pause(); bgmName=""; bgmWant=""; }
+function TryResumeBgm(){                      // 任意按键/点击后补放（浏览器要求先有用户操作）
+  if (!bgmWant) return;
+  if (bgm.paused){ bgm.play().catch(()=>{}); }
+  else if (bgmName !== bgmWant){ BgmStart(bgmWant); }
+}
 
 // ---------------- 帧动画 ----------------
 function jevilJumpN(){ let n=0; for (let i=0;i<8;i++) if (IMG["jevil_jump_"+i] && IMG["jevil_jump_"+i].naturalWidth) n++; return n; }
@@ -1117,7 +1122,7 @@ function GoRoom(){
   g_room.x=WINW/2; g_room.y=Math.round(WINH*0.78);
   g_room.face=1; g_room.t=0; g_room.moving=false;
   g_bullets=[]; g_dmg=[]; g_sparks=[]; Say("");
-  BgmStop(); BgmStart("assets/bgm_verdanturf.mp3");   // 房间 BGM：宝可梦绿宝石 绿茵市
+  BgmStop(); BgmStart("bgm_verdanturf.mp3");          // 房间 BGM：宝可梦绿宝石 绿茵市（ASSET 会自动补 assets/ 前缀）
 }
 function StartBattle(boss){
   g_boss=boss; ResetGame();
@@ -2297,6 +2302,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
 }
 
 window.addEventListener("keydown", e=>{
+  TryResumeBgm();                                   // 浏览器要求先有用户操作，这里补放背景音乐
   if (document.activeElement === nameIn) return;    // 正在起名：键盘全给输入框
   if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Tab"].includes(e.key)) e.preventDefault();
   if (!e.repeat) pressKey(e.key.length===1 ? e.key.toLowerCase() : e.key);
@@ -2312,6 +2318,7 @@ function toLogical(clientX, clientY){
 }
 cv.addEventListener("pointerdown", e=>{
   e.preventDefault();
+  TryResumeBgm();
   const p = toLogical(e.clientX, e.clientY);
   const id = vpadHit(p.x, p.y);
   if (id){                                       // 虚拟按键：按下即生效
@@ -3099,6 +3106,9 @@ function RenderRoom(){
   // 底部提示
   outlineText("方向键 / WASD 走路　·　ESC / B 回主界面", 0, WINH-26, 13,
               "rgba(250,244,232,0.92)", WINW/2, false);
+  if (bgmWant && bgm.paused)                     // 自动播放被浏览器拦住时提示一下
+    outlineText("♪ 按任意键 / 点一下屏幕 开启音乐", 0, WINH-46, 12,
+                "rgba(255,232,150,0.95)", WINW/2, false);
 }
 
 // ---- 主界面
