@@ -55,7 +55,7 @@
   // 线上分享链接靠 ?sharecode=xxx 鉴权，子资源必须带上同一个查询串
   (function () {
     var q = location.search || "";
-    var GAME_VER_JS = "20261106d";   // 每次更新 game.js 时同步改这里
+    var GAME_VER_JS = "20261107a";   // 每次更新 game.js 时同步改这里
     var s = document.createElement("script");
     s.src = "game.js?v=" + GAME_VER_JS + (q ? "&" + q.slice(1) : "");   // 版本号变化才重新下载
     s.onerror = function () {
