@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261107b";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261107c";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -124,10 +124,19 @@ let g_skillUse = 0;            // 角色专属技能本局已用次数（每局�
 
 // ---------------- 我的房间（空房间：白墙 + 木地板，角色用原版 overworld 走路帧） ----------------
 const ROOM_WALL_Y   = 96;                   // 白墙与木地板的分界（宝可梦视角：墙只占上面一窄条）
-const ROOM_FLOOR_TOP= 132;                  // 脚底能走到的最上沿（头可以稍微探进墙里，3/4 视角）
-const ROOM_FLOOR_BOT= WINH-30;              // 脚底能走到的最下沿
 const ROOM_SPD      = 170;                  // 房间里的移动速度（像素/秒）
+const TILE          = 40;                   // 房间格子边长（与地板瓷砖一致）
+const BAG_H         = 62;                   // 底部背包栏高度
+// 家具表：w/h = 未旋转时占的格数（桌子 3×2=6、电视机 3×2=6、沙发 4×2=8）
+const FURN = [
+  { kind:"table", name:"桌子",   w:3, h:2 },
+  { kind:"tv",    name:"电视机", w:3, h:2 },
+  { kind:"sofa",  name:"沙发",   w:4, h:2 },
+];
 let g_room = { x:WINW/2, y:Math.round(WINH*0.78), face:1, t:0, moving:false };
+let g_roomFurn = [];        // 已经摆好的家具：{kind, gx, gy, rot}
+let g_hold     = null;      // 手上拎着的家具：{kind, rot}
+let g_mouse    = { x:WINW/2, y:Math.round(WINH*0.6) };   // 房间里的指针位置（放置预览用）
 let g_lastDrop = "";
 let g_toast = null;            // {txt, t, col}：屏幕上短暂提示（道具生效等）
 
@@ -1119,8 +1128,11 @@ function GoTitle(){
 }
 function GoRoom(){
   g_state=ST_ROOM; g_stateT=0;
-  g_room.x=WINW/2; g_room.y=Math.round(WINH*0.78);
+  loadRoom(); g_hold=null;                        // 读回上次摆的家具
+  g_room.x=WINW/2; g_room.y=clamp(Math.round(WINH*0.78), roomFloorTop(), roomFloorBot());
   g_room.face=1; g_room.t=0; g_room.moving=false;
+  let guard=0;                                    // 出生点正好被家具占了：往上让开
+  while (roomBlocked(g_room.x, g_room.y) && g_room.y>roomFloorTop() && guard++<300) g_room.y-=8;
   g_bullets=[]; g_dmg=[]; g_sparks=[]; Say("");
   BgmStop(); BgmStart("bgm_verdanturf.mp3");          // 房间 BGM：宝可梦绿宝石 绿茵市（ASSET 会自动补 assets/ 前缀）
 }
@@ -1505,15 +1517,18 @@ function Update(dt){
     if (keys.has("ArrowDown")||keys.has("s")||keys.has("S"))  dy+=1;
     if (dx||dy){
       const len=Math.hypot(dx,dy)||1;
-      g_room.x += dx/len*ROOM_SPD*dt;
-      g_room.y += dy/len*ROOM_SPD*dt*0.72;      // 俯视：上下走得慢一点
+      const vx=dx/len*ROOM_SPD*dt, vy=dy/len*ROOM_SPD*dt*0.72;
+      const nx=clamp(g_room.x+vx, 26, WINW-26);
+      const ny=clamp(g_room.y+vy, roomFloorTop(), roomFloorBot());
+      if (!roomBlocked(nx, g_room.y)) g_room.x=nx;   // 分轴判定：贴着家具也能顺着边滑
+      if (!roomBlocked(g_room.x, ny)) g_room.y=ny;
       if (dx) g_room.face = dx>0?1:-1;
       g_room.moving=true; g_room.t += dt;
     } else {
       g_room.moving=false; g_room.t = 0;        // 站住就回到第 0 帧（原版站立姿势）
     }
-    g_room.x=clamp(g_room.x, 70, WINW-70);
-    g_room.y=clamp(g_room.y, ROOM_FLOOR_TOP, ROOM_FLOOR_BOT);
+    g_room.x=clamp(g_room.x, 26, WINW-26);
+    g_room.y=clamp(g_room.y, roomFloorTop(), roomFloorBot());
     break;
   }
   case ST_PAUSE:
@@ -2221,9 +2236,12 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     if (net.invSent){ Say("等待对方回应…"); return; }
   }
   if (vk==="x" && net.invite){ netDeclineInvite(); return; }     // 拒绝邀请
-  // ---- 我的房间：只认返回（走路靠 keys 按住）
+  // ---- 我的房间：B 收回手上的家具 / 没拿东西时才返回；R 旋转
   if (g_state===ST_ROOM){
+    if (g_hold && (vk==="x"||vk==="b"||vk==="Escape"||vk==="Backspace")){ DropHold(); return; }
+    if (g_hold && (vk==="r"||vk==="R")){ RotateHold(); return; }
     if (vk==="Escape"||vk==="x"||vk==="b"){ playSfx("snd_menu_move"); GoTitle(); }
+    if (g_hold && (vk==="z"||vk==="Enter"||vk===" ")) PlaceHold();
     return;
   }
   // ---- 主界面
@@ -2316,10 +2334,16 @@ function toLogical(clientX, clientY){
   const r = cv.getBoundingClientRect();
   return { x:(clientX-r.left)/r.width*WINW, y:(clientY-r.top)/r.height*WINH };
 }
+cv.addEventListener("contextmenu", e=>e.preventDefault());
 cv.addEventListener("pointerdown", e=>{
   e.preventDefault();
   TryResumeBgm();
   const p = toLogical(e.clientX, e.clientY);
+  g_mouse.x=p.x; g_mouse.y=p.y;
+  if (e.button===2){                              // 右键：旋转手上的家具
+    if (g_state===ST_ROOM && g_hold) RotateHold();
+    return;
+  }
   const id = vpadHit(p.x, p.y);
   if (id){                                       // 虚拟按键：按下即生效
     vptr.set(e.pointerId, id);
@@ -2332,6 +2356,8 @@ cv.addEventListener("pointerdown", e=>{
 });
 // 手指不离开屏幕、直接在方向键之间滑 → 立刻换向（真十字键手感）
 cv.addEventListener("pointermove", e=>{
+  const mp = toLogical(e.clientX, e.clientY);
+  g_mouse.x = mp.x; g_mouse.y = mp.y;             // 放置预览跟着指针走
   if (!PAD.on || !vptr.has(e.pointerId)) return;
   const cur = vptr.get(e.pointerId);
   if (cur === "a" || cur === "b") return;          // A/B 不做滑动跟随
@@ -3046,7 +3072,269 @@ function RenderSetPwd(){
 }
 
 
-// ---- 我的房间（空房间：白墙 + 木地板，角色用原版 overworld 走路帧）
+
+// ---------------- 我的房间：格子 / 背包 / 家具 ----------------
+const ROOM_KEY = "sanjiao_room_v1";
+function furnDef(kind){ for (const f of FURN) if (f.kind===kind) return f; return FURN[0]; }
+function roomCols(){ return Math.max(6, Math.floor(WINW/TILE)); }
+function roomRows(){ return Math.max(4, Math.floor((roomBagBand().y - 8 - ROOM_WALL_Y)/TILE)); }
+function roomFloorTop(){ return ROOM_WALL_Y + 30; }                 // 脚底最上沿（头可以探进墙里）
+function roomFloorBot(){ return ROOM_WALL_Y + roomRows()*TILE - 6; } // 脚底最下沿（不钻进背包栏）
+function roomBagBand(){                                             // 背包栏的位置（要躲开虚拟按键）
+  if (PAD.on && PAD.a && PAD.b && PAD.right && PAD.up){
+    const gl = PAD.right.x + PAD.right.w + 10;                      // 左组方向键右边
+    const gr = Math.min(PAD.a.x-PAD.a.r, PAD.b.x-PAD.b.r) - 10;     // 右边 A/B 的左边
+    if (gr-gl >= 190){                                              // 横屏：刚好夹在两组按键中间
+      const w = Math.min(gr-gl, 212);
+      return { x: gl + ((gr-gl)-w)/2, y: WINH-SAFE_B-BAG_H-6, w, h:BAG_H };
+    }
+    const w = Math.min(WINW-22, 268);                               // 竖屏：抬到方向键上方，横跨整屏
+    const vTop = Math.min(PAD.up.y, PAD.left.y) - 12;
+    return { x:(WINW-w)/2, y: Math.max(ROOM_WALL_Y+56, vTop-BAG_H), w, h:BAG_H };
+  }
+  const w = Math.min(WINW-20, 212);                                 // 键鼠：底部居中
+  return { x:(WINW-w)/2, y: WINH-SAFE_B-BAG_H-6, w, h:BAG_H };
+}
+function furnSpan(kind, rot){ const d=furnDef(kind); return rot ? {w:d.h, h:d.w} : {w:d.w, h:d.h}; }
+function furnPx(gx, gy, kind, rot){                                 // 格子坐标 → 像素矩形
+  const sp = furnSpan(kind, rot);
+  return { x:gx*TILE, y:ROOM_WALL_Y+gy*TILE, w:sp.w*TILE, h:sp.h*TILE };
+}
+function rectsHit(a,b){ return a.x1>b.x0 && a.x0<b.x1 && a.y1>b.y0 && a.y0<b.y1; }
+function roomCharBox(x,y){ return { x0:x-13, x1:x+13, y0:y-26, y1:y-2 }; }   // 角色脚下的碰撞盒
+function roomBlocked(x,y){                                          // 角色会不会撞到家具
+  const b = roomCharBox(x,y);
+  for (const it of g_roomFurn){
+    const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+    if (rectsHit(b, {x0:r.x, y0:r.y, x1:r.x+r.w, y1:r.y+r.h})) return true;
+  }
+  return false;
+}
+function furnFree(gx, gy, kind, rot){                               // 这个位置能不能放
+  const sp = furnSpan(kind, rot);
+  if (gx<0 || gy<0 || gx+sp.w>roomCols() || gy+sp.h>roomRows()) return false;
+  const r = { x0:gx*TILE, y0:ROOM_WALL_Y+gy*TILE, x1:(gx+sp.w)*TILE, y1:ROOM_WALL_Y+(gy+sp.h)*TILE };
+  for (const it of g_roomFurn){
+    const q = furnPx(it.gx, it.gy, it.kind, it.rot);
+    if (rectsHit(r, {x0:q.x, y0:q.y, x1:q.x+q.w, y1:q.y+q.h})) return false;
+  }
+  return !rectsHit(r, roomCharBox(g_room.x, g_room.y));
+}
+function holdTiles(){                                               // 手上家具要占的格子（吸附到网格）
+  if (!g_hold) return null;
+  const sp = furnSpan(g_hold.kind, g_hold.rot);
+  let gx = Math.round(g_mouse.x/TILE - sp.w/2);
+  let gy = Math.round((g_mouse.y-ROOM_WALL_Y)/TILE - sp.h/2);
+  gx = clamp(gx, 0, Math.max(0, roomCols()-sp.w));
+  gy = clamp(gy, 0, Math.max(0, roomRows()-sp.h));
+  return { gx, gy, w:sp.w, h:sp.h };
+}
+function roomBagSlots(){
+  const b = roomBagBand(), n = FURN.length, gap = 8;
+  const sw = Math.min(54, (b.w - 22 - gap*(n-1))/n);
+  const total = n*sw + gap*(n-1);
+  const x0 = b.x + (b.w-total)/2, y0 = b.y + (b.h-sw)/2;
+  return FURN.map((f,i)=>({ f, i, x:x0+i*(sw+gap), y:y0, w:sw, h:sw }));
+}
+function roomHold(i){                                               // 点背包格：拿到手上 / 再点一次旋转
+  const f = FURN[i]; if (!f) return;
+  if (g_hold && g_hold.kind===f.kind){ RotateHold(); return; }
+  g_hold = { kind:f.kind, rot:0 };
+  playSfx("snd_menu_select");
+}
+function RotateHold(){
+  if (!g_hold) return;
+  g_hold.rot = g_hold.rot?0:1;
+  playSfx("snd_menu_move");
+}
+function DropHold(){ if (!g_hold) return; g_hold=null; playSfx("snd_menu_move"); setToast("收进背包了", "#cfe0ff"); }
+function PlaceHold(){
+  if (!g_hold) return;
+  const t = holdTiles(); if (!t) return;
+  if (!furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot)){
+    setToast("这里放不下：格子撞上了", "#ff9cae"); playSfx("snd_menu_move"); return;
+  }
+  g_roomFurn.push({ kind:g_hold.kind, gx:t.gx, gy:t.gy, rot:g_hold.rot });
+  saveRoom(); playSfx("snd_menu_select");
+  setToast(`${furnDef(g_hold.kind).name} 放好了`, "#a8f0c0");
+}
+function loadRoom(){
+  g_roomFurn = [];
+  try{
+    const arr = JSON.parse(localStorage.getItem(ROOM_KEY) || "[]");
+    if (Array.isArray(arr)) g_roomFurn = arr
+      .filter(it => it && FURN.some(f=>f.kind===it.kind))
+      .map(it => ({ kind:it.kind, gx:it.gx|0, gy:it.gy|0, rot:it.rot?1:0 }))
+      .filter(it => it.gx>=0 && it.gy>=0 && it.gx<roomCols() && it.gy<roomRows());
+  }catch(e){ g_roomFurn = []; }
+}
+function saveRoom(){ try{ localStorage.setItem(ROOM_KEY, JSON.stringify(g_roomFurn)); }catch(e){} }
+
+// ---- 家具图形（在给定矩形里画，尺寸自适应；rot 时整体转 90°） ----
+function artTable(x,y,w,h,plain){
+  const pad = Math.max(2, w*0.025);
+  ctx.fillStyle="rgba(40,24,10,0.15)";                          // 影子
+  ctx.beginPath(); ctx.ellipse(x+w/2, y+h*0.95, w*0.44, h*0.05, 0,0,6.29); ctx.fill();
+  const lw=Math.max(4,w*0.075);                                 // 四条腿（后两条靠内、颜色更深）
+  ctx.fillStyle="#65401c";
+  ctx.fillRect(x+w*0.20, y+h*0.56, lw*0.75, h*0.34);
+  ctx.fillRect(x+w*0.80-lw*0.75, y+h*0.56, lw*0.75, h*0.34);
+  ctx.fillStyle="#7b4d22";
+  ctx.fillRect(x+w*0.11, y+h*0.52, lw, h*0.43);
+  ctx.fillRect(x+w*0.89-lw, y+h*0.52, lw, h*0.43);
+  const ty=y+h*0.10, th=h*0.40;                                 // 桌面：前缘厚度 + 上表面
+  roundRect(x+pad, ty+th*0.72, w-pad*2, th*0.50, 6);
+  ctx.fillStyle="#8a5624"; ctx.fill();
+  roundRect(x+pad, ty, w-pad*2, th, 6);
+  ctx.fillStyle="#d7a163"; ctx.fill();
+  ctx.strokeStyle="rgba(84,48,18,0.9)"; ctx.lineWidth=Math.max(1.6,w*0.013); ctx.stroke();
+  ctx.save();                                                   // 木纹 + 高光
+  roundRect(x+pad, ty, w-pad*2, th, 6); ctx.clip();
+  ctx.fillStyle="rgba(255,240,210,0.42)";
+  roundRect(x+pad+3, ty+3, w-pad*2-6, th*0.34, 4); ctx.fill();
+  ctx.strokeStyle="rgba(120,74,30,0.28)"; ctx.lineWidth=1;
+  for (let i=1;i<=3;i++){ const yy=ty+th*(0.42+0.16*i);
+    ctx.beginPath(); ctx.moveTo(x+pad*1.6,yy); ctx.lineTo(x+w-pad*1.6,yy); ctx.stroke(); }
+  if (plain) { ctx.restore(); return; }                        // 旋转后不放杯碟
+  const pcx=x+w*0.33, pcy=ty+th*0.58, pr=Math.min(w*0.11, th*0.30);
+  ctx.fillStyle="rgba(60,36,14,0.20)";
+  ctx.beginPath(); ctx.ellipse(pcx, pcy+pr*0.42, pr*1.15, pr*0.52, 0,0,6.29); ctx.fill();
+  ctx.fillStyle="#f4efe2"; ctx.beginPath(); ctx.ellipse(pcx, pcy, pr*1.15, pr*0.62, 0,0,6.29); ctx.fill();
+  ctx.strokeStyle="rgba(150,132,110,0.55)"; ctx.lineWidth=1; ctx.stroke();
+  ctx.fillStyle="#e3dccb"; ctx.beginPath(); ctx.ellipse(pcx, pcy, pr*0.66, pr*0.34, 0,0,6.29); ctx.fill();
+  const mcx=x+w*0.58, mcy=ty+th*0.52, mw=pr*0.98, mh=pr*1.30;
+  ctx.fillStyle="#d8e4ee";
+  roundRect(mcx-mw/2, mcy-mh*0.5, mw, mh, Math.max(2,mw*0.28)); ctx.fill();
+  ctx.strokeStyle="rgba(120,136,152,0.7)"; ctx.lineWidth=1; ctx.stroke();
+  ctx.beginPath(); ctx.arc(mcx+mw*0.62, mcy, mw*0.30, -1.2, 1.2); ctx.stroke();
+  ctx.restore();
+}
+function artTv(x,y,w,h){
+  ctx.fillStyle="rgba(40,24,10,0.15)";
+  ctx.beginPath(); ctx.ellipse(x+w/2, y+h*0.96, w*0.42, h*0.045, 0,0,6.29); ctx.fill();
+  ctx.strokeStyle="#8d95a3"; ctx.lineWidth=Math.max(2,w*0.016);  // 天线
+  ctx.beginPath(); ctx.moveTo(x+w*0.36, y+h*0.14); ctx.lineTo(x+w*0.20, y+h*0.01); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+w*0.54, y+h*0.14); ctx.lineTo(x+w*0.68, y+h*0.01); ctx.stroke();
+  ctx.fillStyle="#cfd6e0";
+  ctx.beginPath(); ctx.arc(x+w*0.20, y+h*0.01, Math.max(1.6,w*0.014),0,6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+w*0.68, y+h*0.01, Math.max(1.6,w*0.014),0,6.29); ctx.fill();
+  ctx.fillStyle="#3b414b";                                       // 底座
+  ctx.fillRect(x+w*0.42, y+h*0.70, w*0.16, h*0.16);
+  ctx.fillRect(x+w*0.30, y+h*0.86, w*0.40, h*0.07);
+  const bx=x+w*0.03, by=y+h*0.13, bw=w*0.94, bh=h*0.60;          // 机身（CRT：上面略窄）
+  ctx.beginPath();
+  ctx.moveTo(bx+bw*0.06, by); ctx.lineTo(bx+bw*0.94, by);
+  ctx.lineTo(bx+bw, by+bh*0.55); ctx.lineTo(bx+bw, by+bh);
+  ctx.lineTo(bx, by+bh); ctx.lineTo(bx, by+bh*0.55); ctx.closePath();
+  ctx.fillStyle="#333944"; ctx.fill();
+  ctx.strokeStyle="#191c22"; ctx.lineWidth=Math.max(1.6,w*0.016); ctx.stroke();
+  ctx.fillStyle="rgba(255,255,255,0.10)";                        // 机身高光
+  ctx.fillRect(bx+bw*0.06, by+1, bw*0.88, Math.max(2,h*0.03));
+  const sx=bx+bw*0.06, sy=by+bh*0.12, sw=bw*0.68, sh=bh*0.74;    // 屏幕
+  roundRect(sx,sy,sw,sh,Math.max(3,w*0.030));
+  const sg=ctx.createLinearGradient(sx,sy,sx+sw,sy+sh);
+  sg.addColorStop(0,"#8ddcf5"); sg.addColorStop(0.55,"#3f9ec0"); sg.addColorStop(1,"#1d5069");
+  ctx.fillStyle=sg; ctx.fill();
+  ctx.strokeStyle="rgba(10,16,22,0.6)"; ctx.lineWidth=Math.max(1.4,w*0.014); ctx.stroke();
+  ctx.save(); ctx.beginPath(); roundRect(sx,sy,sw,sh,Math.max(3,w*0.030)); ctx.clip();
+  ctx.fillStyle="rgba(255,255,255,0.08)";
+  for (let yy=sy+3; yy<sy+sh; yy+=4) ctx.fillRect(sx, yy, sw, 1.5);   // 扫描线
+  ctx.fillStyle="rgba(255,255,255,0.15)";                             // 反光
+  ctx.beginPath(); ctx.moveTo(sx+sw*0.06,sy+sh); ctx.lineTo(sx+sw*0.38,sy);
+  ctx.lineTo(sx+sw*0.54,sy); ctx.lineTo(sx+sw*0.22,sy+sh); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  const px=bx+bw*0.80, pw=bw*0.16;                              // 右侧控制面板
+  ctx.fillStyle="#232830"; ctx.fillRect(px, by+bh*0.14, pw, bh*0.72);
+  ctx.fillStyle="#cfd6e0";
+  ctx.beginPath(); ctx.arc(px+pw/2, by+bh*0.30, Math.max(2,w*0.021),0,6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+pw/2, by+bh*0.52, Math.max(2,w*0.021),0,6.29); ctx.fill();
+  ctx.fillStyle="rgba(140,150,165,0.85)";                        // 喇叭格栅
+  for (let i=0;i<3;i++) ctx.fillRect(px+pw*0.22, by+bh*(0.66+i*0.06), pw*0.56, 1.6);
+}
+function artSofa(x,y,w,h){
+  const col="#b4575e", dark="#7e343a", light="#d4777d";
+  ctx.fillStyle="rgba(40,24,10,0.16)";
+  ctx.beginPath(); ctx.ellipse(x+w/2, y+h*0.96, w*0.44, h*0.05, 0,0,6.29); ctx.fill();
+  ctx.fillStyle="#4a2a1c";                                     // 沙发脚
+  ctx.fillRect(x+w*0.08, y+h*0.88, w*0.05, h*0.08);
+  ctx.fillRect(x+w*0.87, y+h*0.88, w*0.05, h*0.08);
+  roundRect(x+w*0.05, y+h*0.08, w*0.90, h*0.42, Math.max(6,h*0.13));   // 靠背
+  ctx.fillStyle=dark; ctx.fill();
+  roundRect(x+w*0.08, y+h*0.11, w*0.84, h*0.33, Math.max(5,h*0.10));
+  ctx.fillStyle=col; ctx.fill();
+  const sy=y+h*0.46, sh=h*0.42;                                // 坐垫
+  roundRect(x+w*0.09, sy, w*0.82, sh, Math.max(5,h*0.11));
+  ctx.fillStyle=light; ctx.fill();
+  ctx.strokeStyle="rgba(96,34,38,0.55)"; ctx.lineWidth=Math.max(1.2,w*0.008); ctx.stroke();
+  ctx.strokeStyle="rgba(120,52,56,0.50)"; ctx.lineWidth=Math.max(1,w*0.006);
+  ctx.beginPath(); ctx.moveTo(x+w*0.5, sy+2); ctx.lineTo(x+w*0.5, sy+sh-2); ctx.stroke();
+  for (const ax of [x+w*0.015, x+w*0.90]){                     // 扶手
+    roundRect(ax, y+h*0.30, w*0.085, h*0.62, Math.max(4,w*0.028));
+    ctx.fillStyle=col; ctx.fill();
+    ctx.strokeStyle="rgba(80,28,32,0.6)"; ctx.lineWidth=Math.max(1,w*0.007); ctx.stroke();
+  }
+}
+function drawFurn(kind, x, y, w, h, rot, alpha){
+  const art = kind==="tv" ? artTv : kind==="sofa" ? artSofa : artTable;
+  if (alpha!=null){ ctx.save(); ctx.globalAlpha = alpha; }
+  if (rot){                                                     // 旋转 90°：画布宽高互换
+    ctx.save();
+    ctx.translate(x+w/2, y+h/2);
+    ctx.rotate(Math.PI/2);
+    art(-h/2, -w/2, h, w, true);
+    ctx.restore();
+  } else art(x,y,w,h,false);
+  if (alpha!=null) ctx.restore();
+}
+function drawRoomChar(){
+  ctx.fillStyle="rgba(70,42,18,0.20)";                          // 影子
+  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-2, 24, 7, 0, 0, 6.29); ctx.fill();
+  const c = CHARS[mySkin()] || CHARS[0];
+  const walkIm = img("walk_"+c.key), idleIm = img("idle_"+c.key);
+  const walking = !!(g_room.moving && walkIm);
+  let im, frames, f, isIdle=false;
+  if (walking){ im=walkIm; frames=6; f=(2+Math.floor(g_room.t*9))%frames; }
+  else if (idleIm){ im=idleIm; frames=1; f=0; isIdle=true; }
+  else if (walkIm){ im=walkIm; frames=6; f=2; }
+  else { im=img(c.img); frames=c.frames; f=Math.floor(g_animT*7)%frames; }
+  if (!im || !im.naturalWidth) return;
+  const fw=im.naturalWidth/frames, fh=im.naturalHeight;
+  const sc=1;                                                   // 宝可梦式比例：角色约 2 格高
+  const bob = walking ? Math.abs(Math.sin(g_room.t*Math.PI*4.5))*2 : 0;
+  ctx.save();
+  ctx.imageSmoothingEnabled=false;
+  ctx.translate(g_room.x, g_room.y-bob);
+  ctx.scale((isIdle?1:g_room.face)*sc, sc);
+  ctx.drawImage(im, f*fw, 0, fw, fh, -fw/2, -fh, fw, fh);
+  ctx.restore();
+}
+function drawRoomBag(){
+  const b = roomBagBand();
+  roundRect(b.x, b.y, b.w, b.h, 9);                             // 背板（MC 物品栏那种长条）
+  ctx.fillStyle="rgba(26,18,14,0.82)"; ctx.fill();
+  ctx.strokeStyle="rgba(226,196,132,0.55)"; ctx.lineWidth=2; ctx.stroke();
+  roundRect(b.x+3, b.y+3, b.w-6, b.h-6, 7);
+  ctx.strokeStyle="rgba(255,232,180,0.14)"; ctx.lineWidth=1; ctx.stroke();
+  for (const sl of roomBagSlots()){
+    const held = !!(g_hold && g_hold.kind===sl.f.kind);
+    roundRect(sl.x, sl.y, sl.w, sl.h, 6);
+    ctx.fillStyle = held ? "rgba(255,226,120,0.22)" : "rgba(0,0,0,0.32)"; ctx.fill();
+    ctx.strokeStyle = held ? "rgba(255,232,140,0.95)" : "rgba(214,198,168,0.30)";
+    ctx.lineWidth = held?2:1.2; ctx.stroke();
+    const iw = sl.w*0.74, ih = iw*0.62;
+    drawFurn(sl.f.kind, sl.x+(sl.w-iw)/2, sl.y+5, iw, ih, 0, held?1:0.90);
+    outlineText(`${sl.f.name} ${sl.f.w*sl.f.h}格`, 0, sl.y+sl.h-13, 9,
+                held ? "#ffeaa0" : "rgba(240,232,212,0.82)", sl.x+sl.w/2, false);
+    hot(sl.x-2, sl.y-2, sl.w+4, sl.h+4, ()=>{ playSfx("snd_menu_select"); roomHold(sl.i); });
+  }
+  const tip = g_hold
+    ? (isTouch ? "点地板放置 · 再点格子旋转 · B 收回" : "左键放置 · R 旋转 · B 收回")
+    : "点下面的家具拿到手上（数字＝占几格）";
+  outlineText(tip, 0, b.y-15, 11, g_hold ? "rgba(255,232,150,0.95)" : "rgba(250,244,232,0.80)", WINW/2, false);
+}
+
+
+// ---- 我的房间（白墙 + 方格地板 + 家具）
 function RenderRoom(){
   // 白墙
   ctx.fillStyle="#f3f0e8"; ctx.fillRect(0,0,WINW,ROOM_WALL_Y);
@@ -3078,37 +3366,61 @@ function RenderRoom(){
   fg.addColorStop(0,"rgba(60,38,18,0.22)"); fg.addColorStop(1,"rgba(60,38,18,0)");
   ctx.fillStyle=fg; ctx.fillRect(0,ROOM_WALL_Y,WINW,26);
 
-  // 角色影子
-  ctx.fillStyle="rgba(70,42,18,0.20)";
-  ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-2, 24, 7, 0, 0, 6.29); ctx.fill();
-
-  // 角色：站着用原版 overworld 站立图（正面），走动用原版 overworld 跑步帧（侧面）
-  const c = CHARS[mySkin()] || CHARS[0];
-  const walkIm = img("walk_"+c.key), idleIm = img("idle_"+c.key);
-  const walking = !!(g_room.moving && walkIm);
-  let im, frames, f, isIdle=false;
-  if (walking){ im=walkIm; frames=6; f=(2+Math.floor(g_room.t*9))%frames; }
-  else if (idleIm){ im=idleIm; frames=1; f=0; isIdle=true; }
-  else if (walkIm){ im=walkIm; frames=6; f=2; }
-  else { im=img(c.img); frames=c.frames; f=Math.floor(g_animT*7)%frames; }
-  if (im && im.naturalWidth){
-    const fw=im.naturalWidth/frames, fh=im.naturalHeight;
-    const sc=1;                                 // 宝可梦式比例：角色约 2 格高
-    const bob = walking ? Math.abs(Math.sin(g_room.t*Math.PI*4.5))*2 : 0;
+  // ---- 建造模式：铺一层格子线，方便对齐
+  if (g_hold){
     ctx.save();
-    ctx.imageSmoothingEnabled=false;
-    ctx.translate(g_room.x, g_room.y-bob);
-    ctx.scale((isIdle?1:g_room.face)*sc, sc);   // 站立图是正面，不翻转
-    ctx.drawImage(im, f*fw, 0, fw, fh, -fw/2, -fh, fw, fh);
+    ctx.strokeStyle="rgba(255,255,255,0.18)"; ctx.lineWidth=1;
+    const cols=roomCols(), rows=roomRows();
+    for (let c=0;c<=cols;++c){ ctx.beginPath(); ctx.moveTo(c*TILE,ROOM_WALL_Y); ctx.lineTo(c*TILE,ROOM_WALL_Y+rows*TILE); ctx.stroke(); }
+    for (let r=0;r<=rows;++r){ ctx.beginPath(); ctx.moveTo(0,ROOM_WALL_Y+r*TILE); ctx.lineTo(cols*TILE,ROOM_WALL_Y+r*TILE); ctx.stroke(); }
     ctx.restore();
   }
 
-  // 底部提示
-  outlineText("方向键 / WASD 走路　·　ESC / B 回主界面", 0, WINH-26, 13,
-              "rgba(250,244,232,0.92)", WINW/2, false);
-  if (bgmWant && bgm.paused)                     // 自动播放被浏览器拦住时提示一下
-    outlineText("♪ 按任意键 / 点一下屏幕 开启音乐", 0, WINH-46, 12,
-                "rgba(255,232,150,0.95)", WINW/2, false);
+  // ---- 家具 + 角色：按底边从后往前画，站到家具后面会被挡住
+  const draws = [];
+  for (const it of g_roomFurn){
+    const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+    draws.push({ y:r.y+r.h, fn:()=>drawFurn(it.kind, r.x, r.y, r.w, r.h, it.rot, null) });
+  }
+  draws.push({ y:g_room.y, fn:drawRoomChar });
+  draws.sort((a,b)=>a.y-b.y).forEach(d=>d.fn());
+
+  // ---- 手上拎着的家具：半透明预览 + 能否放置
+  if (g_hold){
+    const t = holdTiles();
+    if (t){
+      const sp = furnSpan(g_hold.kind, g_hold.rot);
+      const px = { x:t.gx*TILE, y:ROOM_WALL_Y+t.gy*TILE, w:sp.w*TILE, h:sp.h*TILE };
+      const ok = furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot);
+      ctx.save();
+      ctx.fillStyle = ok ? "rgba(110,255,170,0.20)" : "rgba(255,90,110,0.20)";
+      ctx.fillRect(px.x, px.y, px.w, px.h);
+      ctx.strokeStyle = ok ? "rgba(150,255,190,0.95)" : "rgba(255,120,140,0.95)";
+      ctx.lineWidth = 2; ctx.setLineDash([6,4]);
+      ctx.strokeRect(px.x+1, px.y+1, px.w-2, px.h-2);
+      ctx.restore();
+      drawFurn(g_hold.kind, px.x, px.y, px.w, px.h, g_hold.rot, 0.72);
+    }
+    hot(0, ROOM_WALL_Y, roomCols()*TILE, roomRows()*TILE, ()=>{ PlaceHold(); });
+  }
+
+  // ---- 底部背包栏
+  drawRoomBag();
+
+  // ---- 左上角操作提示 / 音乐提示
+  outlineText(isTouch ? "方向键走路" : "方向键 / WASD 走路　·　B 收回家具 / 返回", 12, 8, 11,
+              "rgba(120,110,96,0.85)", -1, false);
+  if (bgmWant && bgm.paused)
+    outlineText("♪ 按任意键 / 点一下屏幕 开启音乐", 0, ROOM_WALL_Y-24, 12,
+                "rgba(196,140,40,0.95)", WINW/2, false);
+
+  // ---- 顶部小提示（放置成功 / 放不下）
+  if (g_toast){
+    const a = Math.min(1, g_toast.t*1.7);
+    ctx.save(); ctx.globalAlpha=a;
+    outlineText(g_toast.txt, 0, ROOM_WALL_Y-46, 15, g_toast.col, WINW/2);
+    ctx.restore();
+  }
 }
 
 // ---- 主界面
