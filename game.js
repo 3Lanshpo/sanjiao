@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261107d";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261107e";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -127,12 +127,13 @@ const ROOM_WALL_Y   = 96;                   // 白墙与木地板的分界（宝
 const ROOM_SPD      = 170;                  // 房间里的移动速度（像素/秒）
 const TILE          = 40;                   // 房间格子边长（与地板瓷砖一致）
 const BAG_H         = 62;                   // 底部背包栏高度
-// 家具表：w/h = 未旋转时占的格数（桌子 5×2=10、电视机 3×2=6、沙发 4×2=8）
+// 家具表：w/h = 未旋转时占的格数（桌子 5×2=10、电视机 3×2=6、沙发 5×2=10）
+// surface = 这件家具的桌面能摆东西；stack = 这件能摆到桌面上
 // img = assets/ 里的像素素材（OpenGameArt "Cozy Space Furniture" by Bramble & Byte, CC BY 4.0）
 const FURN = [
-  { kind:"table", name:"桌子",   w:5, h:2, img:"furn_table" },
-  { kind:"tv",    name:"电视机", w:3, h:2, img:"furn_tv" },
-  { kind:"sofa",  name:"沙发",   w:4, h:2, img:"furn_sofa" },
+  { kind:"table", name:"桌子",   w:5, h:2, img:"furn_table", surface:true },
+  { kind:"tv",    name:"电视机", w:3, h:2, img:"furn_tv",    stack:true },
+  { kind:"sofa",  name:"沙发",   w:5, h:2, img:"furn_sofa" },
   { kind:"clear", name:"清除",   w:1, h:1, img:"furn_bin", clear:true },   // 清除工具：点家具就拆掉
 ];
 let g_room = { x:WINW/2, y:Math.round(WINH*0.78), face:1, t:0, moving:false };
@@ -3103,6 +3104,48 @@ function furnPx(gx, gy, kind, rot){                                 // 格子坐
   const sp = furnSpan(kind, rot);
   return { x:gx*TILE, y:ROOM_WALL_Y+gy*TILE, w:sp.w*TILE, h:sp.h*TILE };
 }
+// ---- 桌上的东西：桌子只是一块台面，电视机的格子落在桌子范围里就算"摆上去" ----
+function furnSupportOf(it){                                         // 这件家具底下托着它的桌子（没有就返回 null）
+  if (!it || !it.on) return null;
+  const sp = furnSpan(it.kind, it.rot);
+  for (const t of g_roomFurn){
+    if (t===it) continue;
+    const td = furnDef(t.kind);
+    if (!td.surface || t.rot) continue;                             // 转过 90° 的桌子视角不对，当不了台面
+    const ts = furnSpan(t.kind, t.rot);
+    if (it.gx>=t.gx && it.gy>=t.gy && it.gx+sp.w<=t.gx+ts.w && it.gy+sp.h<=t.gy+ts.h) return t;
+  }
+  return null;
+}
+function furnTopY(r){ return r.y + r.h*0.46; }                      // 桌面（前沿）在像素矩形里的高度
+function furnDrawRect(it){                                          // 真正画出来的矩形：在桌上的会缩小并抬到桌面
+  const base = furnPx(it.gx, it.gy, it.kind, it.rot);
+  if (!it.on) return base;
+  const sup = furnSupportOf(it); if (!sup) return base;
+  const sr = furnPx(sup.gx, sup.gy, sup.kind, sup.rot);
+  const sp = furnSpan(it.kind, it.rot);
+  const im = img(furnDef(it.kind).img);
+  const ar = (im && im.naturalWidth) ? im.naturalWidth/im.naturalHeight : 2;
+  let w = Math.min(sp.w*TILE*1.05, sr.w*0.62), h = w/ar;            // 别超过桌面宽度的六成
+  const maxH = sr.h*0.60;                                           // 也别比桌面本身还高太多
+  if (h>maxH){ h=maxH; w=h*ar; }
+  const x = sr.x + (it.gx - sup.gx)*TILE + (sp.w*TILE - w)/2;        // 按摆在桌面的第几格对齐
+  return { x, y: furnTopY(sr) - h, w, h };
+}
+function furnHitRect(it){                                           // 点选判定：桌面上的东西只认画出来的那块
+  const b = furnPx(it.gx, it.gy, it.kind, it.rot);
+  if (!it.on) return b;
+  return furnDrawRect(it);
+}
+function tableUnder(x, y){                                          // 指针下面有没有能摆东西的桌面
+  for (let i=g_roomFurn.length-1; i>=0; --i){
+    const t = g_roomFurn[i];
+    if (!furnDef(t.kind).surface || t.rot) continue;
+    const r = furnPx(t.gx, t.gy, t.kind, t.rot);
+    if (x>=r.x && x<r.x+r.w && y>=r.y-10 && y<r.y+r.h) return t;
+  }
+  return null;
+}
 function rectsHit(a,b){ return a.x1>b.x0 && a.x0<b.x1 && a.y1>b.y0 && a.y0<b.y1; }
 function roomCharBox(x,y){ return { x0:x-13, x1:x+13, y0:y-26, y1:y-2 }; }   // 角色脚下的碰撞盒
 function roomBlocked(x,y){                                          // 角色会不会撞到家具
@@ -3113,24 +3156,37 @@ function roomBlocked(x,y){                                          // 角色会
   }
   return false;
 }
-function furnFree(gx, gy, kind, rot){                               // 这个位置能不能放
+function furnFree(gx, gy, kind, rot, support){                      // 这个位置能不能放
   const sp = furnSpan(kind, rot);
   if (gx<0 || gy<0 || gx+sp.w>roomCols() || gy+sp.h>roomRows()) return false;
   const r = { x0:gx*TILE, y0:ROOM_WALL_Y+gy*TILE, x1:(gx+sp.w)*TILE, y1:ROOM_WALL_Y+(gy+sp.h)*TILE };
   for (const it of g_roomFurn){
+    if (support && it===support) continue;                          // 摆在桌上：桌子本身不算挡路
     const q = furnPx(it.gx, it.gy, it.kind, it.rot);
     if (rectsHit(r, {x0:q.x, y0:q.y, x1:q.x+q.w, y1:q.y+q.h})) return false;
   }
+  if (support) return true;                                         // 桌上的东西不占地面，不用管角色站位
   return !rectsHit(r, roomCharBox(g_room.x, g_room.y));
 }
 function holdTiles(){                                               // 手上家具要占的格子（吸附到网格）
   if (!g_hold) return null;
-  const sp = furnSpan(g_hold.kind, g_hold.rot);
+  const d = furnDef(g_hold.kind), sp = furnSpan(g_hold.kind, g_hold.rot);
   let gx = Math.round(g_mouse.x/TILE - sp.w/2);
   let gy = Math.round((g_mouse.y-ROOM_WALL_Y)/TILE - sp.h/2);
+  if (d.stack && !g_hold.rot){                                      // 能上桌的：指针压在桌子上就吸附到桌面
+    const t = tableUnder(g_mouse.x, g_mouse.y);
+    if (t){
+      const ts = furnSpan(t.kind, t.rot);
+      if (sp.w<=ts.w && sp.h<=ts.h){
+        gx = clamp(gx, t.gx, t.gx+ts.w-sp.w);
+        gy = clamp(gy, t.gy, t.gy+ts.h-sp.h);
+        return { gx, gy, w:sp.w, h:sp.h, on:t };
+      }
+    }
+  }
   gx = clamp(gx, 0, Math.max(0, roomCols()-sp.w));
   gy = clamp(gy, 0, Math.max(0, roomRows()-sp.h));
-  return { gx, gy, w:sp.w, h:sp.h };
+  return { gx, gy, w:sp.w, h:sp.h, on:null };
 }
 function roomBagSlots(){
   const b = roomBagBand(), n = FURN.length, gap = 8;
@@ -3157,7 +3213,7 @@ function RotateHold(){
 function furnAt(x, y){                                            // 指针下面有没有家具
   for (let i=g_roomFurn.length-1; i>=0; --i){
     const it = g_roomFurn[i];
-    const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+    const r = furnHitRect(it);
     if (x>=r.x && x<r.x+r.w && y>=r.y && y<r.y+r.h) return i;
   }
   return -1;
@@ -3166,30 +3222,59 @@ function ClearAt(x, y){
   const i = furnAt(x, y);
   if (i < 0){ setToast("这里没有家具", "#c9d4e8"); playSfx("snd_menu_move"); return; }
   const it = g_roomFurn[i];
-  g_roomFurn.splice(i, 1); saveRoom(); playSfx("snd_menu_select");
-  setToast(`${furnDef(it.kind).name} 拆掉了`, "#a8f0c0");
+  const names = [furnDef(it.kind).name];
+  g_roomFurn.splice(i, 1);
+  for (let j=g_roomFurn.length-1; j>=0; --j){                     // 桌子被拆：桌上的东西一起收走，免得悬空
+    const o = g_roomFurn[j];
+    if (o.on && !furnSupportOf(o)){ names.push(furnDef(o.kind).name); g_roomFurn.splice(j, 1); }
+  }
+  saveRoom(); playSfx("snd_menu_select");
+  setToast(`${names.join(" 和 ")} 拆掉了`, "#a8f0c0");
 }
 function DropHold(){ if (!g_hold) return; g_hold=null; playSfx("snd_menu_move"); setToast("收进背包了", "#cfe0ff"); }
 function PlaceHold(){
   if (!g_hold) return;
-  if (furnDef(g_hold.kind).clear){ ClearAt(g_mouse.x, g_mouse.y); return; }   // 清除工具：拆家具
+  const d = furnDef(g_hold.kind);
+  if (d.clear){ ClearAt(g_mouse.x, g_mouse.y); return; }          // 清除工具：拆家具
   const t = holdTiles(); if (!t) return;
-  if (!furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot)){
-    setToast("这里放不下：格子撞上了", "#ff9cae"); playSfx("snd_menu_move"); return;
+  if (!furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot, t.on)){
+    setToast(t.on ? "桌上摆不开了：先把桌上的东西挪走" : "这里放不下：格子撞上了", "#ff9cae");
+    playSfx("snd_menu_move"); return;
   }
-  g_roomFurn.push({ kind:g_hold.kind, gx:t.gx, gy:t.gy, rot:g_hold.rot });
+  const it = { kind:g_hold.kind, gx:t.gx, gy:t.gy, rot:g_hold.rot };
+  if (t.on) it.on = 1;                                            // 标记：摆在桌子上
+  g_roomFurn.push(it);
   saveRoom(); playSfx("snd_menu_select");
-  setToast(`${furnDef(g_hold.kind).name} 放好了`, "#a8f0c0");
+  setToast(t.on ? `${d.name} 放到桌子上了` : `${d.name} 放好了`, "#a8f0c0");
 }
 function loadRoom(){
-  g_roomFurn = [];
-  try{
-    const arr = JSON.parse(localStorage.getItem(ROOM_KEY) || "[]");
-    if (Array.isArray(arr)) g_roomFurn = arr
-      .filter(it => it && FURN.some(f=>f.kind===it.kind && !f.clear))
-      .map(it => ({ kind:it.kind, gx:it.gx|0, gy:it.gy|0, rot:it.rot?1:0 }))
-      .filter(it => it.gx>=0 && it.gy>=0 && it.gx<roomCols() && it.gy<roomRows());
-  }catch(e){ g_roomFurn = []; }
+  let arr = [];
+  try{ arr = JSON.parse(localStorage.getItem(ROOM_KEY) || "[]"); }catch(e){ arr = []; }
+  g_roomFurn = (Array.isArray(arr) ? arr : [])
+    .filter(it => it && FURN.some(f=>f.kind===it.kind && !f.clear))
+    .map(it => { const o = { kind:it.kind, gx:it.gx|0, gy:it.gy|0, rot:it.rot?1:0 }; if (it.on) o.on=1; return o; })
+    .filter(it => it.gx>=0 && it.gy>=0);
+  g_roomFurn = g_roomFurn.filter(it => !it.on || !!furnSupportOf(it));   // 桌子没了的悬空家具直接不要
+  // 旧存档整理：家具格子改过（沙发 8→10 格），越界或互相压住的就丢掉
+  // 判优先级：沙发先让路，别把玩家后摆的桌子/电视挤掉
+  const order = g_roomFurn.map((it,i)=>({ it, i }))
+    .sort((a,b)=> ((a.it.kind==="sofa"?1:0)-(b.it.kind==="sofa"?1:0)) || (a.i-b.i));
+  const keep = [];
+  for (const { it } of order){
+    const sp = furnSpan(it.kind, it.rot);
+    if (it.gx+sp.w>roomCols() || it.gy+sp.h>roomRows()) continue;
+    const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+    const sup = it.on ? furnSupportOf(it) : null;
+    let bad = false;
+    for (const k of keep){
+      if (sup && k===sup) continue;
+      const q = furnPx(k.gx, k.gy, k.kind, k.rot);
+      if (rectsHit({x0:r.x,y0:r.y,x1:r.x+r.w,y1:r.y+r.h},
+                   {x0:q.x,y0:q.y,x1:q.x+q.w,y1:q.y+q.h})){ bad=true; break; }
+    }
+    if (!bad) keep.push(it);
+  }
+  g_roomFurn = g_roomFurn.filter(it => keep.indexOf(it) >= 0);        // 保持原来的摆放顺序
 }
 function saveRoom(){ try{ localStorage.setItem(ROOM_KEY, JSON.stringify(g_roomFurn)); }catch(e){} }
 
@@ -3297,13 +3382,17 @@ function artSofa(x,y,w,h){
     ctx.strokeStyle="rgba(80,28,32,0.6)"; ctx.lineWidth=Math.max(1,w*0.007); ctx.stroke();
   }
 }
-function drawFurn(kind, x, y, w, h, rot, alpha){
+function drawFurn(kind, x, y, w, h, rot, alpha, onTop){
   const d = furnDef(kind), im = img(d.img);
   if (alpha!=null){ ctx.save(); ctx.globalAlpha = alpha; }
   if (im){
     ctx.save();
     ctx.imageSmoothingEnabled = false;                          // 像素图：最近邻，不糊
-    if (rot){                                                   // 竖着摆：不旋转图像，等比缩放后贴地站好（像素不拉伸）
+    if (onTop){                                                 // 摆在桌面上：影子落在桌面，不落地上
+      ctx.fillStyle="rgba(46,26,10,0.22)";
+      ctx.beginPath(); ctx.ellipse(x+w/2, y+h-1.5, w*0.42, 3, 0, 0, 6.29); ctx.fill();
+      ctx.drawImage(im, x, y, w, h);
+    } else if (rot){                                            // 竖着摆：不旋转图像，等比缩放后贴地站好（像素不拉伸）
       const ar = im.naturalWidth / im.naturalHeight;
       let dw = w, dh = Math.min(h-4, (w/ar)*2);                 // 纵深压一半：看得清"转过去了"，又不至于被拉长
       if (dh > h-4){ dh = h-4; dw = dh*ar; }
@@ -3363,10 +3452,12 @@ function drawRoomBag(){
                 held ? "#ffeaa0" : "rgba(240,232,212,0.82)", sl.x+sl.w/2, false);
     hot(sl.x-2, sl.y-2, sl.w+4, sl.h+4, ()=>{ playSfx("snd_menu_select"); roomHold(sl.i); });
   }
+  const hd = g_hold ? furnDef(g_hold.kind) : null;
   const tip = g_hold
-    ? (furnDef(g_hold.kind).clear
+    ? (hd.clear
         ? "点房间里的家具拆掉 · B 收回工具"
-        : (isTouch ? "点地板放置 · 再点格子旋转 · B 收回" : "左键放置 · R 旋转 · B 收回"))
+        : ((isTouch ? "点地板放置 · 再点格子旋转" : "左键放置 · R 旋转") +
+           (hd.stack ? " · 可放桌上" : "") + " · B 收回"))
     : "点下面的家具拿到手上（数字＝占几格）";
   outlineText(tip, 0, b.y-15, 11, g_hold ? "rgba(255,232,150,0.95)" : "rgba(250,244,232,0.80)", WINW/2, false);
 }
@@ -3417,8 +3508,12 @@ function RenderRoom(){
   // ---- 家具 + 角色：按底边从后往前画，站到家具后面会被挡住
   const draws = [];
   for (const it of g_roomFurn){
-    const r = furnPx(it.gx, it.gy, it.kind, it.rot);
-    draws.push({ y:r.y+r.h, fn:()=>drawFurn(it.kind, r.x, r.y, r.w, r.h, it.rot, null) });
+    const r = furnDrawRect(it);
+    const base = furnPx(it.gx, it.gy, it.kind, it.rot);
+    const sup  = it.on ? furnSupportOf(it) : null;
+    const supB = sup ? furnPx(sup.gx, sup.gy, sup.kind, sup.rot) : base;
+    const sy = it.on ? supB.y+supB.h+0.5 : base.y+base.h;       // 桌上的跟着桌子一起排序，但画在桌子之后
+    draws.push({ y:sy, fn:()=>drawFurn(it.kind, r.x, r.y, r.w, r.h, it.on?0:it.rot, null, !!it.on) });
   }
   draws.push({ y:g_room.y, fn:drawRoomChar });
   draws.sort((a,b)=>a.y-b.y).forEach(d=>d.fn());
@@ -3428,7 +3523,7 @@ function RenderRoom(){
     const hi = furnAt(g_mouse.x, g_mouse.y);
     if (hi >= 0){
       const it = g_roomFurn[hi];
-      const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+      const r = furnHitRect(it);
       ctx.save();
       ctx.fillStyle="rgba(255,80,90,0.22)"; ctx.fillRect(r.x, r.y, r.w, r.h);
       ctx.strokeStyle="rgba(255,120,130,0.95)"; ctx.lineWidth=2; ctx.setLineDash([5,4]);
@@ -3442,17 +3537,19 @@ function RenderRoom(){
   if (g_hold && !furnDef(g_hold.kind).clear){
     const t = holdTiles();
     if (t){
-      const sp = furnSpan(g_hold.kind, g_hold.rot);
-      const px = { x:t.gx*TILE, y:ROOM_WALL_Y+t.gy*TILE, w:sp.w*TILE, h:sp.h*TILE };
-      const ok = furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot);
+      const ok = furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot, t.on);
+      const tmp = { kind:g_hold.kind, gx:t.gx, gy:t.gy, rot:g_hold.rot, on:t.on?1:0 };
+      const dr = t.on ? furnDrawRect(tmp) : furnPx(t.gx, t.gy, g_hold.kind, g_hold.rot);
       ctx.save();
-      ctx.fillStyle = ok ? "rgba(110,255,170,0.20)" : "rgba(255,90,110,0.20)";
-      ctx.fillRect(px.x, px.y, px.w, px.h);
-      ctx.strokeStyle = ok ? "rgba(150,255,190,0.95)" : "rgba(255,120,140,0.95)";
+      ctx.fillStyle = ok ? (t.on ? "rgba(255,238,150,0.20)" : "rgba(110,255,170,0.20)")
+                         : "rgba(255,90,110,0.20)";
+      ctx.fillRect(dr.x, dr.y, dr.w, dr.h);
+      ctx.strokeStyle = ok ? (t.on ? "rgba(255,240,160,0.95)" : "rgba(150,255,190,0.95)")
+                           : "rgba(255,120,140,0.95)";
       ctx.lineWidth = 2; ctx.setLineDash([6,4]);
-      ctx.strokeRect(px.x+1, px.y+1, px.w-2, px.h-2);
+      ctx.strokeRect(dr.x+1, dr.y+1, dr.w-2, dr.h-2);
       ctx.restore();
-      drawFurn(g_hold.kind, px.x, px.y, px.w, px.h, g_hold.rot, 0.72);
+      drawFurn(g_hold.kind, dr.x, dr.y, dr.w, dr.h, t.on?0:g_hold.rot, 0.72, !!t.on);
     }
     hot(0, ROOM_WALL_Y, roomCols()*TILE, roomRows()*TILE, ()=>{ PlaceHold(); });
   }
