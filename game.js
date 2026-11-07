@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261107c";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261107d";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -127,11 +127,13 @@ const ROOM_WALL_Y   = 96;                   // 白墙与木地板的分界（宝
 const ROOM_SPD      = 170;                  // 房间里的移动速度（像素/秒）
 const TILE          = 40;                   // 房间格子边长（与地板瓷砖一致）
 const BAG_H         = 62;                   // 底部背包栏高度
-// 家具表：w/h = 未旋转时占的格数（桌子 3×2=6、电视机 3×2=6、沙发 4×2=8）
+// 家具表：w/h = 未旋转时占的格数（桌子 5×2=10、电视机 3×2=6、沙发 4×2=8）
+// img = assets/ 里的像素素材（OpenGameArt "Cozy Space Furniture" by Bramble & Byte, CC BY 4.0）
 const FURN = [
-  { kind:"table", name:"桌子",   w:3, h:2 },
-  { kind:"tv",    name:"电视机", w:3, h:2 },
-  { kind:"sofa",  name:"沙发",   w:4, h:2 },
+  { kind:"table", name:"桌子",   w:5, h:2, img:"furn_table" },
+  { kind:"tv",    name:"电视机", w:3, h:2, img:"furn_tv" },
+  { kind:"sofa",  name:"沙发",   w:4, h:2, img:"furn_sofa" },
+  { kind:"clear", name:"清除",   w:1, h:1, img:"furn_bin", clear:true },   // 清除工具：点家具就拆掉
 ];
 let g_room = { x:WINW/2, y:Math.round(WINH*0.78), face:1, t:0, moving:false };
 let g_roomFurn = [];        // 已经摆好的家具：{kind, gx, gy, rot}
@@ -957,7 +959,8 @@ const IMG_LIST = ["bg","jevil","soul","spade","diamond","club","knife","boom","s
 for (let i=0;i<8;i++){ IMG_LIST.push("jevil_jump_"+i); IMG_LIST.push("jevil_hurt_"+i); }
 for (let i=0;i<8;i++){ IMG_LIST.push("tenna_"+i); IMG_LIST.push("neo_"+i); IMG_LIST.push("pink_"+i); }
 for (let i=0;i<4;i++){ IMG_LIST.push("spamton_"+i); }
-for (const c of CHARS){ IMG_LIST.push(c.img); IMG_LIST.push(c.atk); IMG_LIST.push("walk_"+c.key); IMG_LIST.push("idle_"+c.key); }   // 待机 + 挥刀 + 原版 overworld 站立/走路
+for (const c of CHARS){ IMG_LIST.push(c.img); IMG_LIST.push(c.atk); IMG_LIST.push("walk_"+c.key); IMG_LIST.push("idle_"+c.key); }
+for (const f of FURN) IMG_LIST.push(f.img);          // 家具像素素材   // 待机 + 挥刀 + 原版 overworld 站立/走路
 
 const SFX = {};
 const SFX_LIST = ["snd_menu_move","snd_menu_select","snd_slash"];
@@ -3084,15 +3087,15 @@ function roomBagBand(){                                             // 背包栏
   if (PAD.on && PAD.a && PAD.b && PAD.right && PAD.up){
     const gl = PAD.right.x + PAD.right.w + 10;                      // 左组方向键右边
     const gr = Math.min(PAD.a.x-PAD.a.r, PAD.b.x-PAD.b.r) - 10;     // 右边 A/B 的左边
-    if (gr-gl >= 190){                                              // 横屏：刚好夹在两组按键中间
-      const w = Math.min(gr-gl, 212);
+    if (gr-gl >= 220){                                             // 横屏：刚好夹在两组按键中间
+      const w = Math.min(gr-gl, 240);
       return { x: gl + ((gr-gl)-w)/2, y: WINH-SAFE_B-BAG_H-6, w, h:BAG_H };
     }
     const w = Math.min(WINW-22, 268);                               // 竖屏：抬到方向键上方，横跨整屏
     const vTop = Math.min(PAD.up.y, PAD.left.y) - 12;
     return { x:(WINW-w)/2, y: Math.max(ROOM_WALL_Y+56, vTop-BAG_H), w, h:BAG_H };
   }
-  const w = Math.min(WINW-20, 212);                                 // 键鼠：底部居中
+  const w = Math.min(WINW-20, 240);                                 // 键鼠：底部居中
   return { x:(WINW-w)/2, y: WINH-SAFE_B-BAG_H-6, w, h:BAG_H };
 }
 function furnSpan(kind, rot){ const d=furnDef(kind); return rot ? {w:d.h, h:d.w} : {w:d.w, h:d.h}; }
@@ -3138,18 +3141,38 @@ function roomBagSlots(){
 }
 function roomHold(i){                                               // 点背包格：拿到手上 / 再点一次旋转
   const f = FURN[i]; if (!f) return;
-  if (g_hold && g_hold.kind===f.kind){ RotateHold(); return; }
+  if (g_hold && g_hold.kind===f.kind){
+    if (f.clear){ DropHold(); return; }                           // 再点一次清除：放回背包
+    RotateHold(); return;
+  }
   g_hold = { kind:f.kind, rot:0 };
   playSfx("snd_menu_select");
+  if (f.clear) setToast("点房间里的家具把它拆掉", "#ffd0a0");
 }
 function RotateHold(){
-  if (!g_hold) return;
+  if (!g_hold || furnDef(g_hold.kind).clear) return;              // 清除工具不旋转
   g_hold.rot = g_hold.rot?0:1;
   playSfx("snd_menu_move");
+}
+function furnAt(x, y){                                            // 指针下面有没有家具
+  for (let i=g_roomFurn.length-1; i>=0; --i){
+    const it = g_roomFurn[i];
+    const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+    if (x>=r.x && x<r.x+r.w && y>=r.y && y<r.y+r.h) return i;
+  }
+  return -1;
+}
+function ClearAt(x, y){
+  const i = furnAt(x, y);
+  if (i < 0){ setToast("这里没有家具", "#c9d4e8"); playSfx("snd_menu_move"); return; }
+  const it = g_roomFurn[i];
+  g_roomFurn.splice(i, 1); saveRoom(); playSfx("snd_menu_select");
+  setToast(`${furnDef(it.kind).name} 拆掉了`, "#a8f0c0");
 }
 function DropHold(){ if (!g_hold) return; g_hold=null; playSfx("snd_menu_move"); setToast("收进背包了", "#cfe0ff"); }
 function PlaceHold(){
   if (!g_hold) return;
+  if (furnDef(g_hold.kind).clear){ ClearAt(g_mouse.x, g_mouse.y); return; }   // 清除工具：拆家具
   const t = holdTiles(); if (!t) return;
   if (!furnFree(t.gx, t.gy, g_hold.kind, g_hold.rot)){
     setToast("这里放不下：格子撞上了", "#ff9cae"); playSfx("snd_menu_move"); return;
@@ -3163,7 +3186,7 @@ function loadRoom(){
   try{
     const arr = JSON.parse(localStorage.getItem(ROOM_KEY) || "[]");
     if (Array.isArray(arr)) g_roomFurn = arr
-      .filter(it => it && FURN.some(f=>f.kind===it.kind))
+      .filter(it => it && FURN.some(f=>f.kind===it.kind && !f.clear))
       .map(it => ({ kind:it.kind, gx:it.gx|0, gy:it.gy|0, rot:it.rot?1:0 }))
       .filter(it => it.gx>=0 && it.gy>=0 && it.gx<roomCols() && it.gy<roomRows());
   }catch(e){ g_roomFurn = []; }
@@ -3275,15 +3298,28 @@ function artSofa(x,y,w,h){
   }
 }
 function drawFurn(kind, x, y, w, h, rot, alpha){
-  const art = kind==="tv" ? artTv : kind==="sofa" ? artSofa : artTable;
+  const d = furnDef(kind), im = img(d.img);
   if (alpha!=null){ ctx.save(); ctx.globalAlpha = alpha; }
-  if (rot){                                                     // 旋转 90°：画布宽高互换
+  if (im){
     ctx.save();
-    ctx.translate(x+w/2, y+h/2);
-    ctx.rotate(Math.PI/2);
-    art(-h/2, -w/2, h, w, true);
+    ctx.imageSmoothingEnabled = false;                          // 像素图：最近邻，不糊
+    if (rot){                                                   // 竖着摆：不旋转图像，等比缩放后贴地站好（像素不拉伸）
+      const ar = im.naturalWidth / im.naturalHeight;
+      let dw = w, dh = Math.min(h-4, (w/ar)*2);                 // 纵深压一半：看得清"转过去了"，又不至于被拉长
+      if (dh > h-4){ dh = h-4; dw = dh*ar; }
+      const dx = x + (w-dw)/2, dy = y + h - dh;
+      ctx.fillStyle="rgba(52,30,10,0.17)";                      // 脚下影子：看着是"站着"不是躺着
+      ctx.beginPath(); ctx.ellipse(x+w/2, y+h-2, dw*0.40, 4.5, 0, 0, 6.29); ctx.fill();
+      ctx.drawImage(im, dx, dy, dw, dh);
+    } else {
+      if (w >= TILE*1.5){                                       // 落地阴影（背包缩略图不画）
+        ctx.fillStyle="rgba(52,30,10,0.16)";
+        ctx.beginPath(); ctx.ellipse(x+w/2, y+h-3, w*0.42, 5.5, 0, 0, 6.29); ctx.fill();
+      }
+      ctx.drawImage(im, x, y, w, h);
+    }
     ctx.restore();
-  } else art(x,y,w,h,false);
+  }
   if (alpha!=null) ctx.restore();
 }
 function drawRoomChar(){
@@ -3321,14 +3357,16 @@ function drawRoomBag(){
     ctx.fillStyle = held ? "rgba(255,226,120,0.22)" : "rgba(0,0,0,0.32)"; ctx.fill();
     ctx.strokeStyle = held ? "rgba(255,232,140,0.95)" : "rgba(214,198,168,0.30)";
     ctx.lineWidth = held?2:1.2; ctx.stroke();
-    const iw = sl.w*0.74, ih = iw*0.62;
-    drawFurn(sl.f.kind, sl.x+(sl.w-iw)/2, sl.y+5, iw, ih, 0, held?1:0.90);
-    outlineText(`${sl.f.name} ${sl.f.w*sl.f.h}格`, 0, sl.y+sl.h-13, 9,
+    const iw = sl.w*(sl.f.clear?0.56:0.78), ih = sl.f.clear ? iw : iw*0.5;
+    drawFurn(sl.f.kind, sl.x+(sl.w-iw)/2, sl.y+(sl.f.clear?4:6), iw, ih, 0, held?1:0.92);
+    outlineText(sl.f.clear ? "清除" : `${sl.f.name} ${sl.f.w*sl.f.h}格`, 0, sl.y+sl.h-13, 9,
                 held ? "#ffeaa0" : "rgba(240,232,212,0.82)", sl.x+sl.w/2, false);
     hot(sl.x-2, sl.y-2, sl.w+4, sl.h+4, ()=>{ playSfx("snd_menu_select"); roomHold(sl.i); });
   }
   const tip = g_hold
-    ? (isTouch ? "点地板放置 · 再点格子旋转 · B 收回" : "左键放置 · R 旋转 · B 收回")
+    ? (furnDef(g_hold.kind).clear
+        ? "点房间里的家具拆掉 · B 收回工具"
+        : (isTouch ? "点地板放置 · 再点格子旋转 · B 收回" : "左键放置 · R 旋转 · B 收回"))
     : "点下面的家具拿到手上（数字＝占几格）";
   outlineText(tip, 0, b.y-15, 11, g_hold ? "rgba(255,232,150,0.95)" : "rgba(250,244,232,0.80)", WINW/2, false);
 }
@@ -3385,8 +3423,23 @@ function RenderRoom(){
   draws.push({ y:g_room.y, fn:drawRoomChar });
   draws.sort((a,b)=>a.y-b.y).forEach(d=>d.fn());
 
+  // ---- 清除工具：指针下的家具描红框
+  if (g_hold && furnDef(g_hold.kind).clear){
+    const hi = furnAt(g_mouse.x, g_mouse.y);
+    if (hi >= 0){
+      const it = g_roomFurn[hi];
+      const r = furnPx(it.gx, it.gy, it.kind, it.rot);
+      ctx.save();
+      ctx.fillStyle="rgba(255,80,90,0.22)"; ctx.fillRect(r.x, r.y, r.w, r.h);
+      ctx.strokeStyle="rgba(255,120,130,0.95)"; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+      ctx.strokeRect(r.x+1, r.y+1, r.w-2, r.h-2);
+      ctx.restore();
+    }
+    if (hot) hot(0, ROOM_WALL_Y, roomCols()*TILE, roomRows()*TILE, ()=>{ PlaceHold(); });
+  }
+
   // ---- 手上拎着的家具：半透明预览 + 能否放置
-  if (g_hold){
+  if (g_hold && !furnDef(g_hold.kind).clear){
     const t = holdTiles();
     if (t){
       const sp = furnSpan(g_hold.kind, g_hold.rot);
@@ -3410,6 +3463,8 @@ function RenderRoom(){
   // ---- 左上角操作提示 / 音乐提示
   outlineText(isTouch ? "方向键走路" : "方向键 / WASD 走路　·　B 收回家具 / 返回", 12, 8, 11,
               "rgba(120,110,96,0.85)", -1, false);
+  outlineText("家具素材 Cozy Space Furniture · Bramble & Byte · CC BY 4.0", 12, 24, 8,
+              "rgba(130,118,100,0.55)", -1, false);   // 素材署名（CC BY 4.0 要求）
   if (bgmWant && bgm.paused)
     outlineText("♪ 按任意键 / 点一下屏幕 开启音乐", 0, ROOM_WALL_Y-24, 12,
                 "rgba(196,140,40,0.95)", WINW/2, false);
