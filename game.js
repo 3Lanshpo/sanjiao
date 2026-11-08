@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261107e";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261108a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -127,13 +127,15 @@ const ROOM_WALL_Y   = 96;                   // 白墙与木地板的分界（宝
 const ROOM_SPD      = 170;                  // 房间里的移动速度（像素/秒）
 const TILE          = 40;                   // 房间格子边长（与地板瓷砖一致）
 const BAG_H         = 62;                   // 底部背包栏高度
-// 家具表：w/h = 未旋转时占的格数（桌子 5×2=10、电视机 3×2=6、沙发 5×2=10）
-// surface = 这件家具的桌面能摆东西；stack = 这件能摆到桌面上
+// 家具表：w/h = 未旋转时占的格数（桌子 5×2=10、电视机 3×2=6、沙发 5×2=10、空调/台灯 1×1）
+// surface = 这件家具的桌面能摆东西；stack = 这件能摆到桌面上；sw = 能靠近按 E 开关
 // img = assets/ 里的像素素材（OpenGameArt "Cozy Space Furniture" by Bramble & Byte, CC BY 4.0）
 const FURN = [
   { kind:"table", name:"桌子",   w:5, h:2, img:"furn_table", surface:true },
   { kind:"tv",    name:"电视机", w:3, h:2, img:"furn_tv",    stack:true },
   { kind:"sofa",  name:"沙发",   w:5, h:2, img:"furn_sofa" },
+  { kind:"ac",    name:"空调",   w:1, h:1, img:"furn_ac",    sw:true },
+  { kind:"lamp",  name:"台灯",   w:1, h:1, img:"furn_lamp",  sw:true, stack:true },
   { kind:"clear", name:"清除",   w:1, h:1, img:"furn_bin", clear:true },   // 清除工具：点家具就拆掉
 ];
 let g_room = { x:WINW/2, y:Math.round(WINH*0.78), face:1, t:0, moving:false };
@@ -2240,10 +2242,11 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     if (net.invSent){ Say("等待对方回应…"); return; }
   }
   if (vk==="x" && net.invite){ netDeclineInvite(); return; }     // 拒绝邀请
-  // ---- 我的房间：B 收回手上的家具 / 没拿东西时才返回；R 旋转
+  // ---- 我的房间：B 收回手上的家具 / 没拿东西时才返回；R 旋转；E 开关身边的家具
   if (g_state===ST_ROOM){
     if (g_hold && (vk==="x"||vk==="b"||vk==="Escape"||vk==="Backspace")){ DropHold(); return; }
     if (g_hold && (vk==="r"||vk==="R")){ RotateHold(); return; }
+    if (!g_hold && (vk==="e"||vk==="E")){ InteractRoom(); return; }
     if (vk==="Escape"||vk==="x"||vk==="b"){ playSfx("snd_menu_move"); GoTitle(); }
     if (g_hold && (vk==="z"||vk==="Enter"||vk===" ")) PlaceHold();
     return;
@@ -3079,24 +3082,26 @@ function RenderSetPwd(){
 
 // ---------------- 我的房间：格子 / 背包 / 家具 ----------------
 const ROOM_KEY = "sanjiao_room_v1";
+const BAG_SLOT = 52, BAG_GAP = 8;                                   // 背包格子最大边长 / 间距
 function furnDef(kind){ for (const f of FURN) if (f.kind===kind) return f; return FURN[0]; }
 function roomCols(){ return Math.max(6, Math.floor(WINW/TILE)); }
 function roomRows(){ return Math.max(4, Math.floor((roomBagBand().y - 8 - ROOM_WALL_Y)/TILE)); }
 function roomFloorTop(){ return ROOM_WALL_Y + 30; }                 // 脚底最上沿（头可以探进墙里）
 function roomFloorBot(){ return ROOM_WALL_Y + roomRows()*TILE - 6; } // 脚底最下沿（不钻进背包栏）
+function bagWantW(){ return FURN.length*BAG_SLOT + 22 + BAG_GAP*(FURN.length-1); }  // 家具变多了，栏也跟着变长
 function roomBagBand(){                                             // 背包栏的位置（要躲开虚拟按键）
   if (PAD.on && PAD.a && PAD.b && PAD.right && PAD.up){
     const gl = PAD.right.x + PAD.right.w + 10;                      // 左组方向键右边
     const gr = Math.min(PAD.a.x-PAD.a.r, PAD.b.x-PAD.b.r) - 10;     // 右边 A/B 的左边
     if (gr-gl >= 220){                                             // 横屏：刚好夹在两组按键中间
-      const w = Math.min(gr-gl, 240);
+      const w = Math.min(gr-gl, Math.max(240, bagWantW()));
       return { x: gl + ((gr-gl)-w)/2, y: WINH-SAFE_B-BAG_H-6, w, h:BAG_H };
     }
-    const w = Math.min(WINW-22, 268);                               // 竖屏：抬到方向键上方，横跨整屏
+    const w = Math.min(WINW-16, Math.max(268, bagWantW()));         // 竖屏：抬到方向键上方，横跨整屏
     const vTop = Math.min(PAD.up.y, PAD.left.y) - 12;
     return { x:(WINW-w)/2, y: Math.max(ROOM_WALL_Y+56, vTop-BAG_H), w, h:BAG_H };
   }
-  const w = Math.min(WINW-20, 240);                                 // 键鼠：底部居中
+  const w = Math.min(WINW-20, Math.max(240, bagWantW()));           // 键鼠：底部居中
   return { x:(WINW-w)/2, y: WINH-SAFE_B-BAG_H-6, w, h:BAG_H };
 }
 function furnSpan(kind, rot){ const d=furnDef(kind); return rot ? {w:d.h, h:d.w} : {w:d.w, h:d.h}; }
@@ -3129,7 +3134,7 @@ function furnDrawRect(it){                                          // 真正画
   let w = Math.min(sp.w*TILE*1.05, sr.w*0.62), h = w/ar;            // 别超过桌面宽度的六成
   const maxH = sr.h*0.60;                                           // 也别比桌面本身还高太多
   if (h>maxH){ h=maxH; w=h*ar; }
-  const x = sr.x + (it.gx - sup.gx)*TILE + (sp.w*TILE - w)/2;        // 按摆在桌面的第几格对齐
+  const x = clamp(sr.x + (it.gx - sup.gx)*TILE + (sp.w*TILE - w)/2, sr.x, sr.x+sr.w-w);  // 按摆的第几格对齐，别探出桌面
   return { x, y: furnTopY(sr) - h, w, h };
 }
 function furnHitRect(it){                                           // 点选判定：桌面上的东西只认画出来的那块
@@ -3189,8 +3194,8 @@ function holdTiles(){                                               // 手上家
   return { gx, gy, w:sp.w, h:sp.h, on:null };
 }
 function roomBagSlots(){
-  const b = roomBagBand(), n = FURN.length, gap = 8;
-  const sw = Math.min(54, (b.w - 22 - gap*(n-1))/n);
+  const b = roomBagBand(), n = FURN.length, gap = BAG_GAP;
+  const sw = Math.min(BAG_SLOT, (b.w - 22 - gap*(n-1))/n);
   const total = n*sw + gap*(n-1);
   const x0 = b.x + (b.w-total)/2, y0 = b.y + (b.h-sw)/2;
   return FURN.map((f,i)=>({ f, i, x:x0+i*(sw+gap), y:y0, w:sw, h:sw }));
@@ -3232,6 +3237,38 @@ function ClearAt(x, y){
   setToast(`${names.join(" 和 ")} 拆掉了`, "#a8f0c0");
 }
 function DropHold(){ if (!g_hold) return; g_hold=null; playSfx("snd_menu_move"); setToast("收进背包了", "#cfe0ff"); }
+
+// ---- 能开关的家具（空调 / 台灯）：走近按 E 互动 ----
+const REACH = 54;                                                  // 够得着的距离（像素，从家具边缘算）
+function furnReachRect(it){                                        // 桌上的东西按"桌子"算距离：走到桌边就能按
+  const sup = it.on ? furnSupportOf(it) : null;
+  return furnPx((sup||it).gx, (sup||it).gy, (sup||it).kind, (sup||it).rot);
+}
+function interTarget(){                                            // 角色旁边最近的一件可互动家具
+  let best=null, bd=1e9;
+  for (const it of g_roomFurn){
+    if (!furnDef(it.kind).sw) continue;
+    const r = furnReachRect(it);
+    const dx = Math.max(r.x-g_room.x, 0, g_room.x-(r.x+r.w));
+    const dy = Math.max(r.y-g_room.y, 0, g_room.y-(r.y+r.h));
+    const d = Math.hypot(dx, dy);
+    if (d<=REACH && d<bd){ bd=d; best=it; }
+  }
+  return best;
+}
+function ToggleFurn(it){
+  if (!it) return;
+  it.sw = it.sw ? 0 : 1;                                          // 1 = 开着，0 = 关着
+  saveRoom();
+  playSfx(it.sw ? "snd_menu_select" : "snd_menu_move");
+  setToast(`${furnDef(it.kind).name} ${it.sw?"打开了":"关掉了"}`,
+           it.sw ? "#ffe6a0" : "#c9d4e8");
+}
+function InteractRoom(){                                           // E：开 / 关身边那件家具
+  const it = interTarget();
+  if (!it){ setToast("旁边没有能按的东西", "#c9d4e8"); playSfx("snd_menu_move"); return; }
+  ToggleFurn(it);
+}
 function PlaceHold(){
   if (!g_hold) return;
   const d = furnDef(g_hold.kind);
@@ -3243,6 +3280,7 @@ function PlaceHold(){
   }
   const it = { kind:g_hold.kind, gx:t.gx, gy:t.gy, rot:g_hold.rot };
   if (t.on) it.on = 1;                                            // 标记：摆在桌子上
+  if (d.sw) it.sw = 0;                                            // 能开关的家具：摆下去默认关着
   g_roomFurn.push(it);
   saveRoom(); playSfx("snd_menu_select");
   setToast(t.on ? `${d.name} 放到桌子上了` : `${d.name} 放好了`, "#a8f0c0");
@@ -3252,7 +3290,12 @@ function loadRoom(){
   try{ arr = JSON.parse(localStorage.getItem(ROOM_KEY) || "[]"); }catch(e){ arr = []; }
   g_roomFurn = (Array.isArray(arr) ? arr : [])
     .filter(it => it && FURN.some(f=>f.kind===it.kind && !f.clear))
-    .map(it => { const o = { kind:it.kind, gx:it.gx|0, gy:it.gy|0, rot:it.rot?1:0 }; if (it.on) o.on=1; return o; })
+    .map(it => {
+      const o = { kind:it.kind, gx:it.gx|0, gy:it.gy|0, rot:it.rot?1:0 };
+      if (it.on) o.on = 1;
+      if (furnDef(it.kind).sw) o.sw = it.sw?1:0;                  // 开关状态跟着存档走
+      return o;
+    })
     .filter(it => it.gx>=0 && it.gy>=0);
   g_roomFurn = g_roomFurn.filter(it => !it.on || !!furnSupportOf(it));   // 桌子没了的悬空家具直接不要
   // 旧存档整理：家具格子改过（沙发 8→10 格），越界或互相压住的就丢掉
@@ -3411,6 +3454,65 @@ function drawFurn(kind, x, y, w, h, rot, alpha, onTop){
   }
   if (alpha!=null) ctx.restore();
 }
+
+// ---- 开了才有的效果：空调吹冷风 / 台灯亮起来（画在家具之后） ----
+function drawAcFx(r, on){
+  const cx = r.x + r.w*0.50, cy = r.y + r.h*0.60, rad = Math.max(5, r.w*0.21);
+  if (on){                                                      // 冷气：三股白雾往下飘
+    ctx.save(); ctx.lineCap="round";
+    for (let i=0;i<3;i++){
+      const ph = (g_animT*0.85 + i*0.34) % 1, a = 1-ph;
+      const bx = r.x + r.w*(0.30 + i*0.20);
+      ctx.strokeStyle = `rgba(186,236,252,${0.62*a})`;
+      ctx.lineWidth = Math.max(2, r.w*0.06);
+      ctx.beginPath();
+      ctx.moveTo(bx, r.y + r.h - 4);
+      ctx.quadraticCurveTo(bx + Math.sin(ph*7+i*2)*r.w*0.13, r.y + r.h + ph*r.h*0.35,
+                           bx - Math.sin(ph*5+i)*r.w*0.07,   r.y + r.h + ph*r.h*0.72);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  ctx.save();                                                   // 前脸出风口：开着才转
+  ctx.beginPath(); ctx.arc(cx, cy, rad, 0, 6.29);
+  ctx.fillStyle = on ? "rgba(14,36,50,0.88)" : "rgba(32,38,48,0.70)"; ctx.fill();
+  ctx.strokeStyle = on ? "rgba(150,226,255,0.95)" : "rgba(116,128,146,0.60)";
+  ctx.lineWidth = Math.max(1.2, r.w*0.035); ctx.stroke();
+  if (on){
+    ctx.translate(cx, cy); ctx.rotate(g_animT*7);
+    ctx.fillStyle = "rgba(188,238,255,0.92)";
+    for (let i=0;i<3;i++){
+      ctx.rotate(Math.PI*2/3);
+      ctx.beginPath(); ctx.moveTo(0,0);
+      ctx.quadraticCurveTo(rad*0.80, -rad*0.30, rad*0.92, rad*0.16);
+      ctx.quadraticCurveTo(rad*0.42,  rad*0.22, 0, 0);
+      ctx.fill();
+    }
+  } else {
+    ctx.strokeStyle="rgba(96,108,124,0.50)"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(cx-rad*0.65, cy); ctx.lineTo(cx+rad*0.65, cy); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawLampFx(r, on){
+  if (!on) return;
+  const lx = r.x + r.w*0.50, ly = r.y + r.h*0.24;                // 灯罩位置
+  const rad = r.w*1.45;
+  const gl = ctx.createRadialGradient(lx, ly, Math.max(1, r.w*0.10), lx, ly, rad);
+  gl.addColorStop(0,    "rgba(255,236,175,0.72)");
+  gl.addColorStop(0.42, "rgba(255,214,124,0.26)");
+  gl.addColorStop(1,    "rgba(255,205,110,0)");
+  ctx.save();
+  ctx.fillStyle = gl;
+  ctx.beginPath(); ctx.arc(lx, ly, rad, 0, 6.29); ctx.fill();
+  ctx.fillStyle = "rgba(255,228,152,0.28)";                      // 脚下（或桌面）那一片暖光
+  ctx.beginPath(); ctx.ellipse(lx, r.y + r.h*0.96, r.w*0.72, Math.max(2, r.h*0.10), 0, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+function drawFurnFx(it, r){                                      // 只给能开关的家具画
+  if (it.kind==="ac")   drawAcFx(r, !!it.sw);
+  if (it.kind==="lamp") drawLampFx(r, !!it.sw);
+}
 function drawRoomChar(){
   ctx.fillStyle="rgba(70,42,18,0.20)";                          // 影子
   ctx.beginPath(); ctx.ellipse(g_room.x, g_room.y-2, 24, 7, 0, 0, 6.29); ctx.fill();
@@ -3446,9 +3548,15 @@ function drawRoomBag(){
     ctx.fillStyle = held ? "rgba(255,226,120,0.22)" : "rgba(0,0,0,0.32)"; ctx.fill();
     ctx.strokeStyle = held ? "rgba(255,232,140,0.95)" : "rgba(214,198,168,0.30)";
     ctx.lineWidth = held?2:1.2; ctx.stroke();
-    const iw = sl.w*(sl.f.clear?0.56:0.78), ih = sl.f.clear ? iw : iw*0.5;
-    drawFurn(sl.f.kind, sl.x+(sl.w-iw)/2, sl.y+(sl.f.clear?4:6), iw, ih, 0, held?1:0.92);
-    outlineText(sl.f.clear ? "清除" : `${sl.f.name} ${sl.f.w*sl.f.h}格`, 0, sl.y+sl.h-13, 9,
+    const thumb = img(sl.f.img);
+    const ar = (thumb && thumb.naturalWidth && thumb.naturalHeight) ? thumb.naturalWidth/thumb.naturalHeight : 2;
+    let iw = sl.w*(sl.f.clear?0.56:0.80), ih = iw/ar;            // 按素材真实比例缩，1×1 的空调/台灯才不会被压扁
+    const ihMax = sl.h*(sl.f.clear?0.62:0.60);
+    if (ih > ihMax){ ih = ihMax; iw = ih*ar; }
+    drawFurn(sl.f.kind, sl.x+(sl.w-iw)/2, sl.y+(sl.f.clear?4:Math.max(3, (ihMax-ih)/2)), iw, ih, 0, held?1:0.92);
+    const lblSize = sl.w>=44 ? 9 : 8;
+    const lbl = sl.f.clear ? "清除" : (sl.w>=44 ? `${sl.f.name} ${sl.f.w*sl.f.h}格` : sl.f.name);
+    outlineText(lbl, 0, sl.y+sl.h-12, lblSize,
                 held ? "#ffeaa0" : "rgba(240,232,212,0.82)", sl.x+sl.w/2, false);
     hot(sl.x-2, sl.y-2, sl.w+4, sl.h+4, ()=>{ playSfx("snd_menu_select"); roomHold(sl.i); });
   }
@@ -3513,10 +3621,35 @@ function RenderRoom(){
     const sup  = it.on ? furnSupportOf(it) : null;
     const supB = sup ? furnPx(sup.gx, sup.gy, sup.kind, sup.rot) : base;
     const sy = it.on ? supB.y+supB.h+0.5 : base.y+base.h;       // 桌上的跟着桌子一起排序，但画在桌子之后
-    draws.push({ y:sy, fn:()=>drawFurn(it.kind, r.x, r.y, r.w, r.h, it.on?0:it.rot, null, !!it.on) });
+    draws.push({ y:sy, fn:()=>{
+      drawFurn(it.kind, r.x, r.y, r.w, r.h, it.on?0:it.rot, null, !!it.on);
+      if (furnDef(it.kind).sw) drawFurnFx(it, r);                // 空调冷风 / 台灯光晕
+    } });
   }
   draws.push({ y:g_room.y, fn:drawRoomChar });
   draws.sort((a,b)=>a.y-b.y).forEach(d=>d.fn());
+
+  // ---- 可开关的家具：走到旁边给按键提示（触屏直接点它也行）
+  if (!g_hold){
+    const near = interTarget();
+    if (near){
+      const r = near.on ? furnDrawRect(near) : furnPx(near.gx, near.gy, near.kind, near.rot);
+      const label = (isTouch ? "点一下 " : "E ") + (near.sw ? "关掉" : "打开") + furnDef(near.kind).name;
+      ctx.font = 'bold 11px "Microsoft YaHei","PingFang SC",sans-serif';
+      const tw = ctx.measureText(label).width, pw = tw + 18, ph = 20;
+      const px = clamp(r.x + r.w/2 - pw/2, 4, Math.max(4, WINW-pw-4));
+      const py = Math.max(ROOM_WALL_Y+3, r.y - ph - 6);
+      ctx.save();
+      roundRect(px, py, pw, ph, 7);
+      ctx.fillStyle = "rgba(18,14,26,0.82)"; ctx.fill();
+      ctx.strokeStyle = near.sw ? "rgba(255,226,140,0.85)" : "rgba(190,210,240,0.55)";
+      ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.restore();
+      outlineText(label, 0, py+4, 11, near.sw ? "#ffe6a0" : "#dfe9ff", px+pw/2);
+      hot(r.x, r.y, r.w, r.h, ()=>{ ToggleFurn(near); });        // 触屏：点家具本身
+      hot(px, py, pw, ph, ()=>{ ToggleFurn(near); });            // 触屏：点提示条
+    }
+  }
 
   // ---- 清除工具：指针下的家具描红框
   if (g_hold && furnDef(g_hold.kind).clear){
@@ -3558,7 +3691,7 @@ function RenderRoom(){
   drawRoomBag();
 
   // ---- 左上角操作提示 / 音乐提示
-  outlineText(isTouch ? "方向键走路" : "方向键 / WASD 走路　·　B 收回家具 / 返回", 12, 8, 11,
+  outlineText(isTouch ? "方向键走路　·　点家具开关" : "方向键 / WASD 走路　·　E 开关家具　·　B 收回家具 / 返回", 12, 8, 11,
               "rgba(120,110,96,0.85)", -1, false);
   outlineText("家具素材 Cozy Space Furniture · Bramble & Byte · CC BY 4.0", 12, 24, 8,
               "rgba(130,118,100,0.55)", -1, false);   // 素材署名（CC BY 4.0 要求）
