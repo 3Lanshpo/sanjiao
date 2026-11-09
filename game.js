@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261109b";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261109c";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -362,6 +362,7 @@ function cloudErrText(e, fallback){
 function cloudEmailOk(s){ return /^[^@\s]{1,64}@[^@\s.]{1,64}\.[^@\s]{2,}$/.test((s||"").trim()); }
 // 云服务端按发布公钥做精确 Origin 校验：只有本应用保留域名（和本地调试）能用云账号
 const CLOUD_HOST = "chaos-boss-battle.app.workbuddy.host";
+const CLOUD_URL  = "https://chaos-boss-battle.app.workbuddy.host/?sharecode=7RKWIXSBZX";
 function cloudHostOk(){
   try {
     const h = String(location.hostname || "").toLowerCase();
@@ -3053,6 +3054,7 @@ let g_su = { mode:"reg", email:"", code:"", pwd:"", sel:0,
              vid:"", handle:null, exist:false, sent:false, busy:false,
              err:"", ok:"", cool:0, coolT:0 };
 function openSignup(mode){
+  if (!cloudHostOk()) return;              // 非应用域名：登录页已改成引导页，这里不再进入
   g_su = { mode: mode==="reset" ? "reset" : "reg", email:(g_login.user||g_cloud.email||"").trim().toLowerCase(),
            code:"", pwd:"", sel:0, vid:"", handle:null, exist:false, sent:false, busy:false,
            err:"", ok:"", cool:0, coolT:0 };
@@ -3068,6 +3070,7 @@ function suCoolLeft(){
 }
 async function suSendCode(){
   if (g_su.busy) return;
+  if (!cloudHostOk()){ g_su.err = "这个网址不支持云账号，回登录页点「打开云账号版」"; g_su.ok=""; return; }
   const email = (g_su.email||"").trim().toLowerCase();
   if (!cloudEmailOk(email)){ g_su.err = "邮箱格式不对"; g_su.ok=""; return; }
   if (suCoolLeft() > 0) return;
@@ -3585,7 +3588,40 @@ function RenderSync(){
   outlineText(isTouch ? "B 返回" : "B / ESC 返回　·　Tab 切换页签", 0, hintY, 12, "#8ea2d8", cx, false);
 }
 
+function RenderHostWarn(){
+  const bg0 = img("bg");
+  if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
+  else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
+  const cx = WINW/2;
+  outlineText("账号要换个链接", 0, 92+VOY, 36, "#ffec78", cx);
+  outlineText("云账号只在游戏自己的 WorkBuddy 分享链接上能用", 0, 150+VOY, 14, "#9fb4e8", cx, false);
+  outlineText("你现在的网址：" + (location.hostname||""), 0, 178+VOY, 12, "#7f92c4", cx, false);
+
+  const bw = Math.min(430, WINW-70), bx = cx-bw/2, by = 210+VOY;
+  btn(bx, by, bw, 56, "打开云账号版 →", ()=>{
+    playSfx("snd_menu_select");
+    location.href = CLOUD_URL;
+  }, 20);
+  outlineText("点一下跳过去，之后把它存成书签就行", 0, by+76, 12, "#8aa0cc", cx, false);
+
+  const ca = currentAccount();
+  if (ca){
+    const ly = by+108;
+    outlineText("先离线玩本机存档（不登账号）", 0, ly, 13, "#ffd257", cx, false);
+    hot(cx-150, ly-6, 300, 24, ()=>{
+      hideInput(); applyAccount(ca.user); playSfx("snd_menu_select"); Say(""); GoTitle();
+      setToast("离线模式：这份进度只在这台电脑上", "#ffd257");
+    });
+  } else {
+    outlineText("换台电脑登同一个邮箱就行，进度跟账号走", 0, by+108, 13, "#7f92c4", cx, false);
+  }
+
+  outlineText(isTouch ? "B 返回" : "B / ESC 返回", 0, 400+VOY, 12, "#8ea2d8", cx, false);
+}
+
 function RenderLogin(){
+  // 非应用域名（如 GitHub Pages）：云账号必然被服务端拒绝，直接引导换链接，别让人对着报错猜网络
+  if (!cloudHostOk()){ RenderHostWarn(); return; }
   const bg0 = img("bg");
   if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
   else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
