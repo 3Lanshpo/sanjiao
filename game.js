@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261108b";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261109a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -23,10 +23,11 @@ const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_FIGHT=5, ST_DMG=6, ST_DIALOG=7, ST_ATTACK=8, ST_WIN=9, ST_LOSE=10,
       ST_WAIT=11,                     // 联机：我已出刀，等队友出刀
       ST_CREATE=12,                   // 首次进入：起名 + 设密码 + 选外貌
-      ST_LOGIN=13,                    // 登录：用户名 + 密码 → 回到对应存档
+      ST_LOGIN=13,                    // 登录：邮箱 + 密码（云端账号）
       ST_SETPWD=14,                   // 给当前存档补设 / 修改密码（老存档没密码时用）
       ST_SPARE=15,                    // 饶恕结算：不是胜利、不掉道具，只在卡牌下标「饶恕」
-      ST_SYNC=16;                     // 存档搬运：导出 / 导入一盘存档码（换电脑用）
+      ST_SYNC=16,                     // 存档搬运：导出 / 导入一盘存档码（换电脑用）
+      ST_SIGNUP=17;                   // 注册 / 重设密码：邮箱验证码 + 密码
 // 我的房间：独立场景，不参与战斗状态机。用负数，避免命中所有 g_state>=ST_INTRO 的战斗判断
 const ST_ROOM=-1;
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
@@ -211,7 +212,7 @@ let g_createErr = "";
 let g_backup = null;          // 从登录页点「新建存档」前的账号快照，B 可以反悔退回去
 let g_nameBlink = 0;
 // 登录页状态
-let g_login = { user:"", pwd:"", sel:0, err:"", lock:false };
+let g_login = { user:"", pwd:"", sel:0, err:"", ok:"", lock:false };
 // 设密码页状态（给无密码的老存档补一个 / 改密码）
 let g_setpwd = { pwd:"", pwd2:"", sel:0, err:"", ok:"" };
 // 存档搬运页状态（0=导出，1=导入）
@@ -308,6 +309,7 @@ function saveProfile(){                      // 写回当前账号（同时保�
                     pwd: g_profile.pwd || (accounts[u] && accounts[u].pwd) || "" };
     saveAccounts(accounts);
     setCurrentUser(u);
+    if (g_cloud.uid) cloudPushSoon();          // 云端账号：改动排队上传
   } catch(e){}
 }
 function applyAccount(u){                    // 切到某个账号
@@ -321,6 +323,199 @@ function applyAccount(u){                    // 切到某个账号
   try { localStorage.setItem("sj_name", net.name); } catch(e){}
   avatarLayout();
   if (net.on) netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+  return true;
+}
+
+// ---------------- 云账号（存档跟着账号走） ----------------
+// 账号存在 WorkBuddy 云服务里，用「邮箱 + 密码」登录：换电脑/换浏览器只要输一次就能把存档拉下来。
+// 本机的账号表退化成缓存（键是 "u:" + 云端用户 id），所以断网也能接着玩，联网后自动补传。
+// 云端表 saves：一行一个用户，owner_id 由 DEFAULT auth.uid() 填、RLS 只让自己读改。
+const CLOUD_TABLE = "saves";
+const LOGOUT_KEY = "sanjiao_logout_v1";       // 主动退过账号：下次打开先停在登录页
+let g_boot = false;                           // 开机连接云端时的中转界面
+let g_cloud = {
+  uid:"", email:"", busy:false, ok:"", err:"",
+  pushT:0, pushAt:0, dirty:false, lastErr:""
+};
+function cloudClient(){
+  try { return window.__cloud || null; } catch(e){ return null; }
+}
+async function waitCloud(ms){                 // 等 SDK 到位（最多 ms 毫秒）
+  const t0 = performance.now();
+  while (!cloudClient() && performance.now() - t0 < ms)
+    await new Promise(r=>setTimeout(r, 120));
+  return cloudClient();
+}
+function cloudErrText(e, fallback){
+  const k = (e && (e.kind || e.code || "")) + "";
+  const m = (e && (e.message || e.error_description || e.msg || "")) + "";
+  const s = (k + " " + m).toLowerCase();
+  if (/network|fetch|timeout|failed to fetch|abort/.test(s)) return "连不上云端，检查一下网络再试";
+  if (/invalid_username_or_password|invalid.*credential|invalid_grant|unauthenticated|incorrect/.test(s)) return "邮箱或密码不对";
+  if (/user.*not.*found|no.*user|not.*registered/.test(s)) return "这个邮箱还没注册过，点「注册」";
+  if (/rate|too many|429/.test(s)) return "试得太频繁了，等一会儿再来";
+  if (/otp|token|verification|expired|invalid.*code/.test(s)) return "验证码不对或已过期，重新发一次";
+  return (m || k || fallback || "云服务出错，稍后再试").replace(/\s+/g," ").slice(0, 64);
+}
+function cloudEmailOk(s){ return /^[^@\s]{1,64}@[^@\s.]{1,64}\.[^@\s]{2,}$/.test((s||"").trim()); }
+function cloudProfileNow(){
+  return { name: g_profile.name || "", skin: g_profile.skin|0,
+           cleared: [0,1,2,3].map(i=>!!(g_profile.cleared||[])[i]),
+           spared:  [0,1,2,3].map(i=>!!(g_profile.spared||[])[i]) };
+}
+function cloudRoom(){
+  try {
+    if (typeof g_roomFurn !== "undefined" && Array.isArray(g_roomFurn))
+      return g_roomFurn.map(f=>({ kind:f.kind, gx:f.gx|0, gy:f.gy|0, rot:f.rot?1:0, on:f.on?1:0, sw:f.sw?1:0 }));
+  } catch(e){}
+  return localRoom();
+}
+function localRoom(){
+  try { const a = JSON.parse(localStorage.getItem("sanjiao_room_v1") || "[]"); return Array.isArray(a)?a:[]; } catch(e){ return []; }
+}
+function cloudSnapshot(){
+  return { v:1, prof: cloudProfileNow(), room: cloudRoom(), at: Date.now() };
+}
+async function cloudPushNow(){               // 上传当前存档（幂等：一个账号一行）
+  const c = cloudClient();
+  if (!c || !g_cloud.uid) return false;
+  g_cloud.pushAt = Date.now();
+  try {
+    const { data, error } = await c.database.from(CLOUD_TABLE)
+      .upsert({ data: cloudSnapshot(), owner_name: (g_profile.name || null),
+                updated_at: new Date().toISOString() }, { onConflict: "owner_id" })
+      .select("id");
+    if (error){ g_cloud.lastErr = cloudErrText(error, "存档上传失败"); return false; }
+    g_cloud.dirty = false; g_cloud.lastErr = "";
+    return Array.isArray(data);
+  } catch(e){ g_cloud.lastErr = cloudErrText(e, "存档上传失败"); return false; }
+}
+function cloudPushSoon(delay){                // 存档一变就排队上传，1.2 秒内的多次改动合并成一次
+  if (!g_cloud.uid) return;
+  g_cloud.dirty = true;
+  if (g_cloud.pushT) return;
+  g_cloud.pushT = setTimeout(()=>{
+    g_cloud.pushT = 0;
+    if (g_cloud.dirty) cloudPushNow();
+  }, delay || 1200);
+}
+async function cloudPull(){                   // 取回云端存档（没有就返回 null）
+  const c = cloudClient();
+  if (!c || !g_cloud.uid) return null;
+  try {
+    const { data, error } = await c.database.from(CLOUD_TABLE).select("data").maybeSingle();
+    if (error){
+      if (error.code !== "PGRST116") g_cloud.lastErr = cloudErrText(error, "存档下载失败");
+      return null;
+    }
+    return (data && data.data) || null;
+  } catch(e){ g_cloud.lastErr = cloudErrText(e, "存档下载失败"); return null; }
+}
+function cloudKey(){ return "u:" + (g_cloud.uid || "me"); }
+function cloudApply(data){                    // 云端存档 → 本机缓存 → 当前档案
+  const key = cloudKey();
+  const accounts = loadAccounts();
+  const old = accounts[key];
+  const prof = (data && data.prof) || null;
+  if (!prof && !old) return false;
+  const src = prof || old;
+  const name = String(src.name||"").replace(/\s+/g," ").trim().slice(0,12);
+  const skin = src.skin|0;
+  const cl = Array.isArray(src.cleared) ? src.cleared : [];
+  const sp = Array.isArray(src.spared)  ? src.spared  : [];
+  accounts[key] = { name, skin: (skin>=0 && skin<CHARS.length) ? skin : 0, pwd:"",
+                    cleared: [0,1,2,3].map(i=>!!cl[i]), spared: [0,1,2,3].map(i=>!!sp[i]) };
+  saveAccounts(accounts);
+  if (data && Array.isArray(data.room)){       // 家具跟着账号一起搬
+    try { localStorage.setItem("sanjiao_room_v1", JSON.stringify(data.room)); } catch(e){}
+    try { if (typeof loadRoom === "function") loadRoom(); } catch(e){}
+  }
+  applyAccount(key);
+  return true;
+}
+function pickLocalSave(){                     // 云端还没存档时，把本机这份带上去（老玩家不丢进度）
+  const accounts = loadAccounts();
+  const keys = [g_accountKey, currentUserName()].filter(Boolean);
+  for (const k of keys){
+    const a = accounts[k];
+    if (a && a.name) return { name:a.name, skin:a.skin|0, cleared:a.cleared||[], spared:a.spared||[] };
+  }
+  try {
+    const p = JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
+    if (p && p.name) return { name:p.name, skin:p.skin|0, cleared:p.cleared||[], spared:p.spared||[] };
+  } catch(e){}
+  return null;
+}
+function cloudUidOf(user){
+  return (user && (user.id || user.uid || user.userId)) || g_cloud.uid || "me";
+}
+async function cloudEnter(user){              // 登录/注册成功 → 取云端存档 → 进标题
+  try { localStorage.removeItem(LOGOUT_KEY); } catch(e){}
+  g_cloud.uid = cloudUidOf(user);
+  g_cloud.email = (user && user.email) || (g_login.user||g_su.email||"").trim().toLowerCase();
+  g_login.ok = "正在取回云端存档…";
+  const data = await cloudPull();
+  g_login.ok = "";
+  if (data && data.prof){
+    cloudApply(data);
+    hideInput(); playSfx("snd_menu_select"); Say(""); GoTitle();
+    setToast("云端存档已就位", "#8ff0b8");
+    return true;
+  }
+  const local = pickLocalSave();
+  if (local){
+    cloudApply({ v:1, prof: local, room: localRoom() });
+    cloudPushSoon(200);
+    hideInput(); playSfx("snd_menu_select"); Say(""); GoTitle();
+    setToast("已把本机存档上传到这个账号", "#8ff0b8");
+    return true;
+  }
+  hideInput(); Say("");
+  openCreate(true);                           // 全新账号：起名 + 选外貌，完成后自动上传
+  return true;
+}
+async function cloudLogin(){                  // 邮箱 + 密码 → 云端会话
+  if (g_cloud.busy) return;
+  const email = (g_login.user||"").trim().toLowerCase();
+  const pwd = g_login.pwd || "";
+  if (!cloudEmailOk(email)){ g_login.err = "账号就是邮箱，格式不对"; g_login.pwd=""; g_inputMode=""; return; }
+  if (pwd.length < 6){ g_login.err = "密码至少 6 位"; return; }
+  const c = cloudClient();
+  if (!c){ g_login.err = "云账号组件还在加载，等两秒再点一次"; return; }
+  g_cloud.busy = true; g_login.err = ""; g_login.ok = "正在登录…";
+  playSfx("snd_menu_select");
+  let r;
+  try { r = await c.auth.signInWithPassword({ email, password: pwd }); }
+  catch(e){ r = { error:e }; }
+  g_cloud.busy = false; g_login.ok = "";
+  if (!r || r.error || !r.data){
+    g_login.err = cloudErrText(r && r.error, "登录失败");
+    g_login.pwd = ""; g_inputMode = "";
+    playSfx("snd_menu_move");
+    return;
+  }
+  await cloudEnter(r.data.user || {});
+}
+async function cloudLogout(){
+  const c = cloudClient();
+  g_cloud.busy = true;
+  try { if (c) await c.auth.signOut(); } catch(e){}
+  g_cloud.busy = false;
+  g_cloud.uid = ""; g_cloud.email = "";
+  try { localStorage.setItem(LOGOUT_KEY, "1"); } catch(e){}   // 下次打开先停在登录页
+  g_login.ok = "已退出账号（本机存档还在）";
+  playSfx("snd_menu_move");
+}
+async function cloudRestore(){                // 启动时静默恢复会话
+  const c = cloudClient();
+  if (!c) return false;
+  let s = null;
+  try { const r = await c.auth.getSession(); s = r && r.data; } catch(e){ return false; }
+  if (!s || !s.user) return false;
+  g_cloud.uid = cloudUidOf(s.user);
+  g_cloud.email = s.user.email || "";
+  const data = await cloudPull();
+  if (data && data.prof) cloudApply(data);
   return true;
 }
 
@@ -2132,7 +2327,7 @@ function vpadHit(x,y){                           // 命中的按键 id
 }
 function pressBack(){                            // B：返回 / 取消
   if (g_state===ST_ROOM){ pressKey("x"); return; }
-  if (g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD || g_state===ST_SYNC){ pressKey("x"); return; }
+  if (g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD || g_state===ST_SYNC || g_state===ST_SIGNUP){ pressKey("x"); return; }
   if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
   if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
   if (net.invite){ netDeclineInvite(); return; }
@@ -2157,19 +2352,37 @@ function deadQuit(){                    // 阵亡后：退出战斗 / 退出队�
 function deadSpectate(){ g_deadChoice=true; Say("观战中……按暂停键可退出"); }
 
 function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
-  // ---- 登录
+  // ---- 登录（云端账号：邮箱 + 密码）
   if (g_state===ST_LOGIN){
-    if (vk==="ArrowUp" || vk==="ArrowDown"){
+    if (vk==="ArrowUp" || vk==="ArrowDown" || vk==="Tab"){
       g_login.sel = 1 - g_login.sel; g_login.err = "";
-      if (g_login.sel===0) setInputMode("loginUser", g_login.user, 12, true);
-      else                 setInputMode("loginPwd",  g_login.pwd,  16, true);
+      if (g_login.sel===0) setInputMode("loginUser", g_login.user, 64, true);
+      else                 setInputMode("loginPwd",  g_login.pwd,  32, true);
       focusInput();
       playSfx("snd_menu_move");
     }
     if (vk==="z"||vk==="Enter") doLogin();
-    if (vk==="x"||vk==="Escape"){
-      if (!g_login.lock && g_accountKey){ hideInput(); playSfx("snd_menu_move"); GoTitle(); }
-      else g_login.err = "要先登录才能进";
+    if (vk==="x"||vk==="Escape"||vk==="b"){
+      if (g_accountKey || g_cloud.uid){ hideInput(); playSfx("snd_menu_move"); GoTitle(); }
+      else g_login.err = "先登录或注册一个账号";
+    }
+    return;
+  }
+  // ---- 注册 / 重设密码
+  if (g_state===ST_SIGNUP){
+    if (vk==="Tab" || vk==="ArrowUp" || vk==="ArrowDown"){
+      const d = (vk==="ArrowDown" || vk==="Tab") ? 1 : -1;
+      g_su.sel = (g_su.sel + d + 3) % 3; g_su.err = "";
+      if (g_su.sel===0)      setInputMode("suEmail", g_su.email, 64, true);
+      else if (g_su.sel===1) setInputMode("suCode",  g_su.code,  8,  true);
+      else                   setInputMode("suPwd",   g_su.pwd,   32, true);
+      focusInput();
+      playSfx("snd_menu_move");
+    }
+    if (vk==="z"||vk==="Enter") suSubmit();
+    if (vk==="s"||vk==="S") suSendCode();                       // S = 发验证码
+    if (vk==="x"||vk==="Escape"||vk==="b"){
+      hideInput(); playSfx("snd_menu_move"); openLogin(g_su.email, false);
     }
     return;
   }
@@ -2736,7 +2949,7 @@ function drawFighters(){
   }
 }
 function drawAvatar(){
-  if (!AVATAR.on || g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD) return;
+  if (!AVATAR.on || g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD || g_state===ST_SIGNUP) return;
   const p=AVATAR.pad, x=AVATAR.x-p, y=AVATAR.y-p;
   const w=AVATAR.w+p*2, h=AVATAR.h+p*2;
   ctx.save();
@@ -2757,8 +2970,8 @@ function setInputMode(mode, value, maxLen, force){
   if (!nameIn) return;
   if (g_inputMode === mode && !force) return;
   g_inputMode = mode;
-  nameIn.type = (mode==="loginPwd" || mode==="createPwd" || mode==="setPwd" || mode==="setPwd2") ? "password" : "text";
-  nameIn.maxLength = maxLen || (mode==="name"||mode==="loginUser" ? 12 : 16);
+  nameIn.type = (mode==="loginPwd" || mode==="createPwd" || mode==="setPwd" || mode==="setPwd2" || mode==="suPwd") ? "password" : "text";
+  nameIn.maxLength = maxLen || (mode==="name" ? 12 : (mode==="loginUser"||mode==="suEmail" ? 64 : 16));
   nameIn.value = value || "";
 }
 function placeInput(mode, value, bx, by, bw, bh, maxLen){
@@ -2784,36 +2997,120 @@ function focusInput(){
 if (nameIn){
   nameIn.addEventListener("input", ()=>{
     const v = nameIn.value;
-    if (g_inputMode==="loginUser")       g_login.user = v.slice(0,12);
-    else if (g_inputMode==="loginPwd")   g_login.pwd  = v.slice(0,16);
+    if (g_inputMode==="loginUser")       g_login.user = v.slice(0,64);
+    else if (g_inputMode==="loginPwd")   g_login.pwd  = v.slice(0,32);
+    else if (g_inputMode==="suEmail")    g_su.email   = v.slice(0,64);
+    else if (g_inputMode==="suCode"){    g_su.code    = v.replace(/\D/g,"").slice(0,8); }
+    else if (g_inputMode==="suPwd")      g_su.pwd     = v.slice(0,32);
     else if (g_inputMode==="createPwd")  g_createPwd = v.slice(0,16);
     else if (g_inputMode==="setPwd")     g_setpwd.pwd  = v.slice(0,16);
     else if (g_inputMode==="setPwd2")    g_setpwd.pwd2 = v.slice(0,16);
     else if (g_inputMode==="syncCode"){  g_sync.code = v.slice(0,600); g_sync.over = ""; syncCheck(); }
     else                                 g_createName = v.slice(0,12);
-    g_login.err = ""; g_createErr = ""; g_setpwd.err = "";
+    g_login.err = ""; g_createErr = ""; g_setpwd.err = ""; g_su.err = "";
   });
   nameIn.addEventListener("keydown", e=>{
     e.stopPropagation();                      // 打字别触发游戏按键
     if (e.key==="Enter"){
       e.preventDefault();
       if (g_inputMode==="loginUser" || g_inputMode==="loginPwd") doLogin();
+      else if (g_inputMode==="suEmail" || g_inputMode==="suCode" || g_inputMode==="suPwd") suSubmit();
       else if (g_inputMode==="setPwd" || g_inputMode==="setPwd2") doSetPwd();
       else if (g_inputMode==="createPwd") createConfirmPwd();
       else createConfirmName();
     } else if (e.key==="Escape"){ e.preventDefault(); nameIn.blur(); }
-    else if (e.key==="ArrowUp" || e.key==="ArrowDown"){ e.preventDefault(); pressKey(e.key); }
+    else if (e.key==="ArrowUp" || e.key==="ArrowDown" || e.key==="Tab"){ e.preventDefault(); pressKey(e.key); }
   });
 }
 
-// ---- 登录 / 账号切换 ----
+// ---- 登录 / 云账号 ----
 function openLogin(prefillUser, lock){
-  g_login = { user: prefillUser||"", pwd:"", sel: prefillUser?1:0, err:"", lock: !!lock,
-              wipeAsk:false, wipeT:0 };
+  g_login = { user: prefillUser||g_cloud.email||"", pwd:"", sel: prefillUser?1:0,
+              err:"", lock:false, ok:"", wipeAsk:false, wipeT:0 };
   g_inputMode = "";                            // 强制下一次渲染重建输入框
   g_state = ST_LOGIN; g_stateT = 0;
   Say(""); BgmStop(); crtDirty = true;
   if (!isTouch) setTimeout(()=>focusInput(), 60);
+}
+function doLogin(){ cloudLogin(); }             // 兼容旧调用点（Z / Enter / 按钮）
+function newAccountFromLogin(){
+  hideInput();
+  openSignup("reg");
+}
+
+// ---- 注册 / 重设密码：邮箱验证码 + 密码 ----
+let g_su = { mode:"reg", email:"", code:"", pwd:"", sel:0,
+             vid:"", handle:null, exist:false, sent:false, busy:false,
+             err:"", ok:"", cool:0, coolT:0 };
+function openSignup(mode){
+  g_su = { mode: mode==="reset" ? "reset" : "reg", email:(g_login.user||g_cloud.email||"").trim().toLowerCase(),
+           code:"", pwd:"", sel:0, vid:"", handle:null, exist:false, sent:false, busy:false,
+           err:"", ok:"", cool:0, coolT:0 };
+  g_inputMode = "";
+  g_state = ST_SIGNUP; g_stateT = 0;
+  Say(""); BgmStop(); crtDirty = true;
+  if (!isTouch) setTimeout(()=>focusInput(), 60);
+}
+function suCoolLeft(){
+  if (!g_su.cool) return 0;
+  const left = g_su.cool - Math.floor((performance.now() - g_su.coolT)/1000);
+  return left > 0 ? left : 0;
+}
+async function suSendCode(){
+  if (g_su.busy) return;
+  const email = (g_su.email||"").trim().toLowerCase();
+  if (!cloudEmailOk(email)){ g_su.err = "邮箱格式不对"; g_su.ok=""; return; }
+  if (suCoolLeft() > 0) return;
+  const c = cloudClient();
+  if (!c){ g_su.err = "云账号组件还在加载，等两秒再点"; g_su.ok=""; return; }
+  g_su.busy = true; g_su.err = ""; g_su.ok = "正在发送验证码…";
+  playSfx("snd_menu_select");
+  let r;
+  try {
+    r = g_su.mode==="reset" ? await c.auth.resetPasswordForEmail(email)
+                            : await c.auth.sendOtp({ email });
+  } catch(e){ r = { error:e }; }
+  g_su.busy = false; g_su.ok = "";
+  if (!r || r.error){ g_su.err = cloudErrText(r && r.error, "验证码发不出去"); return; }
+  if (g_su.mode==="reset"){
+    g_su.handle = r.data;
+    g_su.ok = "验证码已发到邮箱（没收到就翻一下垃圾箱）";
+  } else {
+    g_su.vid = (r.data && r.data.verificationId) || "";
+    g_su.exist = !!(r.data && r.data.isExistingUser);
+    g_su.ok = g_su.exist ? "这个邮箱已经注册过了：退回登录页直接登" : "验证码已发到邮箱（没收到就翻一下垃圾箱）";
+  }
+  g_su.sent = true;
+  g_su.cool = 60; g_su.coolT = performance.now();
+  playSfx("snd_menu_select");
+}
+async function suSubmit(){
+  if (g_su.busy) return;
+  const email = (g_su.email||"").trim().toLowerCase();
+  const code  = (g_su.code||"").replace(/\D/g,"");
+  const pwd   = g_su.pwd || "";
+  if (!cloudEmailOk(email)){ g_su.err = "邮箱格式不对"; g_su.ok=""; return; }
+  if (g_su.mode==="reg" && g_su.exist){ g_su.err = "这个邮箱已经有账号了，回去点「登录」"; g_su.ok=""; return; }
+  if (!g_su.sent || !code){ g_su.err = "先点「发送验证码」，再把收到的数字填进来"; g_su.ok=""; return; }
+  if (pwd.length < 6){ g_su.err = "密码至少 6 位"; g_su.ok=""; return; }
+  const c = cloudClient();
+  if (!c){ g_su.err = "云账号组件还在加载，等两秒再点"; g_su.ok=""; return; }
+  g_su.busy = true; g_su.err = ""; g_su.ok = "正在验证…";
+  playSfx("snd_menu_select");
+  let r;
+  try {
+    if (g_su.mode==="reset"){
+      if (!g_su.handle){ g_su.busy=false; g_su.ok=""; g_su.err = "先点「发送验证码」"; return; }
+      r = await g_su.handle.updateUser({ nonce: code, password: pwd });
+    } else {
+      r = await c.auth.verifyOtp({ email, verificationId: g_su.vid,
+                                   isExistingUser:false, token: code, password: pwd });
+    }
+  } catch(e){ r = { error:e }; }
+  g_su.busy = false; g_su.ok = "";
+  if (!r || r.error){ g_su.err = cloudErrText(r && r.error, "验证没通过"); return; }
+  if (g_su.mode==="reset") setToast("密码已改，用新密码登录就行", "#8ff0b8");
+  await cloudEnter((r.data && r.data.user) || { email });
 }
 function askWipePwd(){                          // 两步确认后清掉本机密码（存档本身不删）
   const now = performance.now();
@@ -2836,35 +3133,8 @@ function askWipePwd(){                          // 两步确认后清掉本机�
   Say("");
   GoTitle();
 }
-function doLogin(){
-  const u = (g_login.user||"").replace(/\s+/g," ").trim().slice(0,12);
-  const p = g_login.pwd || "";
-  if (!u){ g_login.err = "请输入用户名"; return; }
-  const accounts = loadAccounts();
-  const acc = accounts[u];
-  if (!acc){
-    const all = Object.keys(accounts);
-    g_login.err = all.length
-      ? `这台电脑没有「${u}」的存档（只有 ${all.slice(0,3).join("、")}）`
-      : "这台电脑还没存档：存档只在本机浏览器，换电脑要「搬运」";
-    g_login.pwd = ""; g_inputMode = "";
-    playSfx("snd_menu_move");
-    return;
-  }
-  if (acc.pwd && acc.pwd !== hashPwd(p)){ g_login.err = "密码不对，再试一次"; g_login.pwd=""; g_inputMode=""; return; }
-  if (!applyAccount(u)){ g_login.err = "存档读不出来，再试一次"; return; }
-  trustDevice(u);                              // 这台设备记住你：下次打开不用再输密码
-  hideInput();
-  playSfx("snd_menu_select");
-  Say("");
-  GoTitle();
-}
-function newAccountFromLogin(){
-  hideInput();
-  g_backup = { key: g_accountKey, prof: JSON.parse(JSON.stringify(g_profile)) };
-  g_accountKey = ""; g_profile = { name:"", skin:-1, cleared:[false,false,false,false], spared:[false,false,false,false], pwd:"" };
-  openCreate(true);
-}
+// 旧的「本机账号登录」已由云端账号取代：doLogin / newAccountFromLogin 定义在上面。
+// 本机账号表仍然保留，但只作为缓存（键 "u:<云端 uid>"），不再作为登录凭据。
 
 // ---- 给存档设密码（老存档迁移过来时 pwd 为空，就是靠这里补上） ----
 function openSetPwd(){
@@ -2912,15 +3182,17 @@ function createConfirmName(){
   let n = (nameIn ? nameIn.value : g_createName) || "";
   n = n.replace(/\s+/g," ").trim().slice(0,12);
   if (!n){ g_createErr = "名字不能是空的"; return; }
-  const accounts = loadAccounts();
-  if (accounts[n] && n !== g_accountKey){      // 名字就是用户名：撞号会让两份存档混在一起
-    g_createErr = "这个名字已经有存档了，换一个或去登录";
-    return;
+  if (!g_cloud.uid){                           // 云端账号下名字只是显示名，不参与登录，不用查重
+    const accounts = loadAccounts();
+    if (accounts[n] && n !== g_accountKey){    // 本机离线存档：名字就是钥匙，撞号会混在一起
+      g_createErr = "这个名字已经有存档了，换一个或去登录";
+      return;
+    }
   }
   g_createName = n;
   if (nameIn) nameIn.blur();
   g_createErr = "";
-  g_createStage = g_createNew ? 1 : 2;         // 新建 → 设密码；改名 → 直接选外貌
+  g_createStage = (g_createNew && !g_cloud.uid) ? 1 : 2;   // 新建 → 设密码；云端账号 / 改名 → 直接选外貌
   g_inputMode = "";
   playSfx("snd_menu_select");
   if (g_createStage===1){
@@ -2941,6 +3213,22 @@ function createConfirmPwd(){
 function createChooseSkin(){
   if (g_createName) g_profile.name = g_createName;
   g_profile.skin = g_createSel;
+  if (g_cloud.uid){                            // 云端账号：键固定是 u:<uid>，改名不动键
+    g_accountKey = cloudKey();
+    saveProfile();
+    cloudPushSoon(250);                        // 新档案立刻传上去
+    hideInput();
+    net.name = g_profile.name;
+    try { localStorage.setItem("sj_name", net.name); } catch(e){}
+    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+    avatarLayout();
+    playSfx("snd_menu_select");
+    g_createNew = false;
+    g_backup = null;
+    setToast("存档已同步到云端", "#8ff0b8");
+    GoTitle();
+    return;
+  }
   if (g_createNew) g_profile.pwd = hashPwd(g_createPwd);
   // 改名 → 账号表的键跟着换
   const oldKey = g_accountKey, newKey = g_profile.name;
@@ -3292,63 +3580,107 @@ function RenderLogin(){
   if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
   else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
   const cx = WINW/2;
-  outlineText("登　录", 0, 30+VOY, 46, "#ffec78", cx);
-  outlineText("输入用户名和密码，回到你的存档", 0, 92+VOY, 14, "#9fb4e8", cx, false);
+  outlineText("登　录", 0, 24+VOY, 44, "#ffec78", cx);
+  outlineText("账号就是邮箱：换哪台电脑登进来，存档都跟着你", 0, 82+VOY, 14, "#9fb4e8", cx, false);
 
-  const bw = Math.min(440, WINW-70), bx = cx-bw/2, bh = 64;
-  const uy = 138+VOY, py = 214+VOY;
-  loginBox(bx, uy, bw, bh, g_login.sel===0, g_login.user, "用户名", false);
-  loginBox(bx, py, bw, bh, g_login.sel===1, g_login.pwd, "密码", true);
+  const bw = Math.min(430, WINW-70), bx = cx-bw/2, bh = 56;
+  const uy = 110+VOY, py = 180+VOY;
+  const email = (nameIn && g_inputMode==="loginUser") ? nameIn.value : g_login.user;
+  const pwd   = (nameIn && g_inputMode==="loginPwd")  ? nameIn.value : g_login.pwd;
+  loginBox(bx, uy, bw, bh, g_login.sel===0, email, "邮箱", false);
+  loginBox(bx, py, bw, bh, g_login.sel===1, pwd, "密码", true);
+  if (g_login.sel===0) placeInput("loginUser", g_login.user, bx, uy, bw, bh, 64);
+  else                 placeInput("loginPwd",  g_login.pwd,  bx, py, bw, bh, 32);
+  hot(bx, uy, bw, bh, ()=>{ g_login.sel=0; setInputMode("loginUser", g_login.user, 64, true); focusInput(); });
+  hot(bx, py, bw, bh, ()=>{ g_login.sel=1; setInputMode("loginPwd",  g_login.pwd,  32, true); focusInput(); });
 
-  if (g_login.sel===0) placeInput("loginUser", g_login.user, bx, uy, bw, bh, 12);
-  else                 placeInput("loginPwd",  g_login.pwd,  bx, py, bw, bh, 16);
+  const c = cloudClient();
+  const msg = g_login.err || g_login.ok || (c ? "" : (window.__cloudFail ? "云账号组件加载失败：点下面小字重试" : "正在连接云账号服务…"));
+  if (msg) outlineText(msg, 0, 248+VOY, 13,
+                       g_login.err ? "#ff8a8a" : (g_login.ok ? "#8ff0b8" : "#ffd257"), cx, false);
+  if (!c) hot(cx-190, 242+VOY, 380, 20, ()=>{ if (window.__cloudRetry) window.__cloudRetry(); });
 
-  // 点框切换焦点（手机点一下就弹键盘）
-  hot(bx, uy, bw, bh, ()=>{
-    g_login.sel=0;
-    setInputMode("loginUser", g_login.user, 12, true); focusInput();
-  });
-  hot(bx, py, bw, bh, ()=>{
-    g_login.sel=1;
-    setInputMode("loginPwd", g_login.pwd, 16, true); focusInput();
-  });
+  const by = 272+VOY, bwd = Math.min(150, (WINW-90)/2), gap = 22;
+  const bx0 = cx - (bwd*2+gap)/2;
+  btn(bx0,           by, bwd, 46, "登　录", ()=>{ doLogin(); }, 19);
+  btn(bx0+bwd+gap,   by, bwd, 46, "注　册", ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); }, 19);
 
-  const allNames = Object.keys(loadAccounts());
-  if (g_login.err) outlineText(g_login.err, 0, 288+VOY, 13, "#ff8a8a", cx, false);
-  else if (!allNames.length)
-    outlineText("这台电脑还没有存档：换电脑要用「搬运」把旧存档导进来", 0, 288+VOY, 13, "#ffd257", cx, false);
-  else if (g_login.user && !allNames.includes(g_login.user.replace(/\s+/g," ").trim()))
-    outlineText(`这台电脑上有：${allNames.slice(0,4).join(" / ")}${allNames.length>4?" …":""}`,
-                0, 288+VOY, 12, "#8fa0c8", cx, false);
-
-  // 进入 / 新建 / 给当前存档设密码 / 搬运存档（换电脑）
-  const bwd = Math.min(122, (WINW-80)/4), gap = 12;
-  const bx0 = cx - (bwd*4+gap*3)/2;
-  const byBtn = 308+VOY;
-  btn(bx0,               byBtn, bwd, 44, "进　入",  ()=>{ playSfx("snd_menu_select"); doLogin(); }, 17);
-  btn(bx0+bwd+gap,       byBtn, bwd, 44, "新　建",  ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); }, 17);
-  const cur = loadAccounts()[g_accountKey];
-  btn(bx0+(bwd+gap)*2,   byBtn, bwd, 44, (cur && cur.pwd) ? "改密码" : "设密码",
-      ()=>{ playSfx("snd_menu_select"); if (!openSetPwd()) g_login.err = "先登录一个存档，再给它设密码"; }, 17);
-  btn(bx0+(bwd+gap)*3,   byBtn, bwd, 44, "搬　运",
-      ()=>{ playSfx("snd_menu_select"); openSync(allNames.length ? 0 : 1); }, 17);
-
-  if (g_accountKey && !g_login.lock)
-    outlineText(`当前存档：${g_accountKey}${(cur && cur.pwd) ? "（已设密码）" : "（还没有密码）"}`,
-                0, 364+VOY, 12, (cur && cur.pwd) ? "#8ff0b8" : "#ffd257", cx, false);
-
-  if (g_login.lock) outlineText("输入这个存档的密码才能进入", 0, 386+VOY, 13, "#8ea2d8", cx, false);
-  else              outlineText(isTouch?"B 返回":"X / ESC 返回", 0, 386+VOY, 13, "#8ea2d8", cx, false);
-  outlineText(isTouch?"↑ ↓ 切换　A 进入":"↑ ↓ 切换　Z 进入", 0, 408+VOY, 13, "#b4d2ff", cx, false);
-  if (!g_login.lock)
-    outlineText("换电脑登录不了？点「搬运」：旧电脑导出，这台导入", 0, 432+VOY, 12, "#7f92c4", cx, false);
-
-  // 忘记密码的安全出口：清掉本机密码（存档数据不删），免得把自己永久锁在外面
-  if (g_login.lock){
-    outlineText(g_login.wipeAsk ? "再点一次：清除本机密码并进入" : "忘记密码？点这里清除本机密码",
-                0, 432+VOY, 12, g_login.wipeAsk ? "#ff9a9a" : "#7f92c4", cx, false);
-    hot(cx-130, 428+VOY, 260, 18, ()=>{ askWipePwd(); });
+  // ---- 三个小字入口：忘记密码 / 离线进入 / 退出账号
+  const ly = 334+VOY;
+  const ca = currentAccount();
+  const fx = ca ? cx-140 : cx;
+  outlineText("忘记密码", 0, ly, 13, "#8fb6ff", fx, false);
+  hot(fx-40, ly-6, 96, 22, ()=>{ playSfx("snd_menu_move"); openSignup("reset"); });
+  if (ca){
+    outlineText("离线进入本机存档", 0, ly, 13, "#ffd257", cx+14, false);
+    hot(cx-64, ly-6, 156, 22, ()=>{
+      hideInput(); applyAccount(ca.user); playSfx("snd_menu_select"); Say(""); GoTitle();
+      setToast("离线模式：这份进度只在这台电脑上", "#ffd257");
+    });
   }
+  if (g_cloud.uid){
+    outlineText("退出账号", 0, ly+22, 12, "#8a92b0", cx, false);
+    hot(cx-40, ly+16, 80, 20, ()=>{ cloudLogout(); });
+    outlineText(`当前云端账号：${g_cloud.email || g_cloud.uid}`, 0, ly+42, 11, "#7f92c4", cx, false);
+  }
+
+  outlineText(isTouch ? "B 返回" : "B / ESC 返回　·　X 返回", 0, 400+VOY, 12, "#8ea2d8", cx, false);
+  if (!g_cloud.uid && !ca)
+    outlineText("第一次来先点「注册」：邮箱收一次验证码就好", 0, 422+VOY, 12, "#7f92c4", cx, false);
+  else if (!g_cloud.uid && ca)
+    outlineText("云端存档在哪台电脑都能登；离线进入只玩本机这份", 0, 422+VOY, 11, "#7f92c4", cx, false);
+}
+
+function RenderSignup(){
+  const bg0 = img("bg");
+  if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
+  else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
+  const cx = WINW/2, reset = g_su.mode==="reset";
+  outlineText(reset ? "重 设 密 码" : "注　册", 0, 10+VOY, 38, "#ffec78", cx);
+  outlineText(reset ? "邮箱收验证码 → 直接设新密码" : "一个邮箱一个账号；注册完换电脑输邮箱 + 密码就能进",
+              0, 56+VOY, 13, "#9fb4e8", cx, false);
+
+  const bw = Math.min(430, WINW-70), bx = cx-bw/2, bh = 46;
+  const ey = 92+VOY, cy2 = 162+VOY, py2 = 232+VOY;
+  const email = (nameIn && g_inputMode==="suEmail") ? nameIn.value : g_su.email;
+  const code  = (nameIn && g_inputMode==="suCode")  ? nameIn.value : g_su.code;
+  const pwd   = (nameIn && g_inputMode==="suPwd")   ? nameIn.value : g_su.pwd;
+
+  outlineText("邮箱", bx, ey-16, 12, "#b4d2ff", -1, false);
+  const btnW = Math.min(126, bw*0.34);
+  loginBox(bx, ey, bw-btnW-8, bh, g_su.sel===0, email, "你的邮箱", false);
+  const cool = suCoolLeft();
+  roundRect(bx+bw-btnW, ey, btnW, bh, 8);
+  ctx.fillStyle = cool>0 ? "rgba(34,38,56,0.9)" : "rgba(46,58,96,0.92)"; ctx.fill();
+  ctx.strokeStyle = cool>0 ? "#5a6688" : "#7fa0d0"; ctx.lineWidth = 2; ctx.stroke();
+  outlineText(cool>0 ? cool+"s 后重发" : "发送验证码", 0, ey+bh/2-9, 13,
+              cool>0 ? "#8a92b0" : "#cfe0ff", bx+bw-btnW/2, false);
+  hot(bx+bw-btnW, ey, btnW, bh, ()=>{ suSendCode(); });
+
+  outlineText("验证码", bx, cy2-16, 12, "#b4d2ff", -1, false);
+  loginBox(bx, cy2, bw, bh, g_su.sel===1, code, "邮箱里收到的 6 位数字", false);
+
+  outlineText(reset ? "新密码（至少 6 位）" : "密码（至少 6 位，别忘，就靠它登录）", bx, py2-16, 12, "#b4d2ff", -1, false);
+  loginBox(bx, py2, bw, bh, g_su.sel===2, pwd, "自己设一个", true);
+
+  if (g_su.sel===0)      placeInput("suEmail", g_su.email, bx, ey,  bw-btnW-8, bh, 64);
+  else if (g_su.sel===1) placeInput("suCode",  g_su.code,  bx, cy2, bw, bh, 8);
+  else                   placeInput("suPwd",   g_su.pwd,   bx, py2, bw, bh, 32);
+  hot(bx, ey, bw-btnW-8, bh, ()=>{ g_su.sel=0; setInputMode("suEmail", g_su.email, 64, true); focusInput(); });
+  hot(bx, cy2, bw, bh, ()=>{ g_su.sel=1; setInputMode("suCode", g_su.code, 8, true); focusInput(); });
+  hot(bx, py2, bw, bh, ()=>{ g_su.sel=2; setInputMode("suPwd", g_su.pwd, 32, true); focusInput(); });
+
+  const msg = g_su.err || g_su.ok;
+  if (msg) outlineText(msg, 0, 290+VOY, 12, g_su.err ? "#ff8a8a" : "#8ff0b8", cx, false);
+
+  const bwd = Math.min(170, (WINW-90)/2);
+  btn(cx-bwd-10, 310+VOY, bwd, 44, reset ? "改 好 了" : "注 册 并 进 入", ()=>{ suSubmit(); }, 17);
+  btn(cx+10,     310+VOY, Math.min(96, bwd), 44, "返 回", ()=>{
+    hideInput(); playSfx("snd_menu_move"); openLogin(g_su.email, false);
+  }, 16);
+
+  outlineText(isTouch ? "点输入框打字" : "Tab 换栏位　Enter 提交", 0, 368+VOY, 12, "#8ea2d8", cx, false);
+  outlineText("验证码 5 分钟有效；没收到就看垃圾箱，或再发一次", 0, 390+VOY, 11, "#7f92c4", cx, false);
 }
 
 function RenderSetPwd(){
@@ -3628,7 +3960,10 @@ function loadRoom(){
   }
   g_roomFurn = g_roomFurn.filter(it => keep.indexOf(it) >= 0);        // 保持原来的摆放顺序
 }
-function saveRoom(){ try{ localStorage.setItem(ROOM_KEY, JSON.stringify(g_roomFurn)); }catch(e){} }
+function saveRoom(){
+  try{ localStorage.setItem(ROOM_KEY, JSON.stringify(g_roomFurn)); }catch(e){}
+  if (g_cloud.uid) cloudPushSoon();                 // 家具也存进云端，换电脑房间还在
+}
 
 // ---- 家具图形（在给定矩形里画，尺寸自适应；rot 时整体转 90°） ----
 function artTable(x,y,w,h,plain){
@@ -4032,14 +4367,13 @@ function RenderTitle(){
 
   // 账号 / 登录入口（左上角）：新存档带密码，可以在这里换回别的存档
   const lx = VOX+14, ly = VOY+8, lw = 152, lh = 30;
-  const curAcc = loadAccounts()[g_accountKey];
-  const noPwd = !!(g_accountKey && curAcc && !curAcc.pwd);
+  const cloudOn = !!g_cloud.uid;
   roundRect(lx, ly, lw, lh, 8);
   ctx.fillStyle = "rgba(10,8,20,0.55)"; ctx.fill();
-  ctx.strokeStyle = noPwd ? "rgba(255,210,87,0.55)" : "rgba(160,190,255,0.45)";
+  ctx.strokeStyle = cloudOn ? "rgba(140,255,190,0.5)" : "rgba(160,190,255,0.45)";
   ctx.lineWidth = 1.4; ctx.stroke();
-  outlineText(g_profile.name ? `账号 ${g_profile.name} · ${noPwd ? "设密码" : "登录"}` : "登录 / 切换账号",
-              0, ly+7, 13, noPwd ? "#ffd257" : "#cfe0ff", lx+lw/2, false);
+  outlineText(g_profile.name ? `${cloudOn ? "☁ " : "离线 "}${g_profile.name}` : "登录 / 注册",
+              0, ly+7, 13, cloudOn ? "#9dffc4" : "#cfe0ff", lx+lw/2, false);
   hot(lx-4, ly-4, lw+8, lh+8, ()=>{ playSfx("snd_menu_move"); openLogin("", false); });
 
   // 我的房间（空房间，进去看看自己选的角色）
@@ -4161,11 +4495,18 @@ function Render(){
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
-  if (g_state!==ST_CREATE && g_state!==ST_LOGIN && g_state!==ST_SETPWD && g_state!==ST_SYNC) hideInput();
+  if (g_boot){                                // 开机先确认云账号：别让旧存档闪一下再跳登录页
+    ctx.fillStyle = "rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH);
+    outlineText("正在连接云端…", 0, WINH/2-16, 20, "#9fb4e8", WINW/2, false);
+    outlineText("账号和存档都在云上，换电脑也能接着打", 0, WINH/2+12, 12, "#6f80a8", WINW/2, false);
+    return;
+  }
+  if (g_state!==ST_CREATE && g_state!==ST_LOGIN && g_state!==ST_SETPWD && g_state!==ST_SYNC && g_state!==ST_SIGNUP) hideInput();
   if (g_state===ST_CREATE){ RenderCreate(); drawVPad(); return; }
   if (g_state===ST_LOGIN){ RenderLogin(); drawVPad(); return; }
   if (g_state===ST_SETPWD){ RenderSetPwd(); drawVPad(); return; }
   if (g_state===ST_SYNC){ RenderSync(); drawVPad(); return; }
+  if (g_state===ST_SIGNUP){ RenderSignup(); drawVPad(); return; }
   if (g_state===ST_ROOM){ RenderRoom(); drawVPad(); return; }
   if (g_state===ST_TITLE){ RenderTitle(); drawAvatar(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
@@ -5183,20 +5524,33 @@ setInterval(()=>{ try{ netTick(); }catch(e){} }, 250);
 loadFinishCb = ()=>{
   document.getElementById("loading").style.display="none";
   avatarLayout();
-  const ca = currentAccount();
-  if (ca && ca.acc && ca.acc.pwd && !isTrustedDevice(ca.user)){
-    openLogin(ca.user, true);                 // 换了设备/清了缓存：先登录才进得去
-  } else if (ca && ca.acc){
-    applyAccount(ca.user);                    // 本机已登录过 / 无密码账号：直接进
-    GoTitle();
-  } else if (g_profile.skin>=0 && g_profile.name){
-    GoTitle();                                // 兜底：账号表读不出来但档案还在
-  } else {
-    openCreate();                             // 第一次进来
-  }
   playVoice("Jevil_voiceclip_CHAOS.wav");
   requestAnimationFrame(t=>{ lastT=t; loop(t); });
+  bootAccount();                              // 账号/存档可能要走网络，先跑起来再决定进哪一页
 };
+
+async function bootAccount(){
+  g_boot = true;
+  const ca = currentAccount();
+  const c = await waitCloud(4000);            // SDK 从 CDN 来，可能比游戏晚到一会儿
+  let ok = false;
+  if (c){                                     // 有云端会话：直接恢复（最多等 6 秒，不能卡死开局）
+    try {
+      ok = await Promise.race([
+        cloudRestore(),
+        new Promise(r=>setTimeout(()=>r(false), 6000))
+      ]);
+    } catch(e){ ok = false; }
+  }
+  g_boot = false;
+  if (ca && ca.acc) applyAccount(ca.user);    // 本机缓存：断网也能接着玩
+  if (ok){ GoTitle(); return; }               // 云端会话还在：直接进
+  let out = false;
+  try { out = localStorage.getItem(LOGOUT_KEY) === "1"; } catch(e){}
+  if (!out && ca && ca.acc && !ca.acc.pwd){ GoTitle(); return; }   // 本机离线存档
+  if (!c && ca && ca.acc && !ca.acc.pwd){ GoTitle(); return; }     // 云组件没加载：照旧离线玩
+  openLogin("", false);                       // 邮箱框留空：本机昵称不是账号
+}
 // 若音频事件不触发（缓存），兜底检查
 setTimeout(function poll(){
   if (loadFinishCb && loadDone>=loadTotal){ loadFinishCb(); loadFinishCb=null; }
