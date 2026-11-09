@@ -62,7 +62,42 @@
       "https://cdn.staticfile.net/mqtt/5.10.1/mqtt.min.js",
       "https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"
     ];
-    var GAME_VER_JS = "20261108b";   // 每次更新 game.js 时同步改这里
+    // 云账号（WorkBuddy 云服务）：账号和存档都在云端，换电脑输邮箱 + 密码就能登进来。
+    // 和联机库一样多源回退；库没到 / 全挂了，游戏照样能离线玩，只是登录页会提示。
+    var CLOUD_SRC = [
+      "https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js",
+      "https://unpkg.com/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"
+    ];
+    var CLOUD_CFG = {
+      endpoint: "https://chaos-boss-battle.app.workbuddy.host",
+      oauthRelayBaseUrl: "https://www.workbuddy.cn/v2/as/genie-baas/oauth",
+      publishableKey: "wbpk_QYT7bHxXpgPbkMGkpE9RlN_2I4IDhcyja6NcYuqORadOjEVN3xkif2c"
+    };
+    window.__cloudCfg = CLOUD_CFG;
+    function cloudInit() {
+      if (window.__cloud) return true;
+      if (typeof WorkBuddyCloud === "undefined") return false;
+      try {
+        window.__cloud = WorkBuddyCloud.createWorkBuddyCloud(CLOUD_CFG);
+        return true;
+      } catch (e) {
+        window.__cloudErr = String((e && e.message) || e);
+        return false;
+      }
+    }
+    function cloudLoad(i) {
+      if (cloudInit()) return;
+      if (i >= CLOUD_SRC.length) { window.__cloudFail = true; return; }
+      var s = document.createElement("script");
+      s.src = CLOUD_SRC[i];
+      s.async = true;
+      s.onload = function () { if (!cloudInit()) cloudLoad(i + 1); };
+      s.onerror = function () { try { s.remove(); } catch (e) {} cloudLoad(i + 1); };
+      document.head.appendChild(s);
+    }
+    window.__cloudRetry = function () { window.__cloudFail = false; cloudLoad(0); };
+
+    var GAME_VER_JS = "20261109a";   // 每次更新 game.js 时同步改这里
     var booted = false;
     function boot() {
       if (booted) return;
@@ -88,6 +123,7 @@
       document.head.appendChild(s);
     }
     setTimeout(boot, 2500);                                // 兜底：不让 CDN 卡住开局（库晚到 game.js 会自动补连）
+    cloudLoad(0);                                          // 云账号 SDK 并行加载
     tryLoad(0);
   })();
 </script>
