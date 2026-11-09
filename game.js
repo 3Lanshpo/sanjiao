@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261108a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261108b";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -25,7 +25,8 @@ const ST_TITLE=0, ST_PAUSE=1, ST_INTRO=2, ST_MENU=3, ST_SUB=4,
       ST_CREATE=12,                   // 首次进入：起名 + 设密码 + 选外貌
       ST_LOGIN=13,                    // 登录：用户名 + 密码 → 回到对应存档
       ST_SETPWD=14,                   // 给当前存档补设 / 修改密码（老存档没密码时用）
-      ST_SPARE=15;                    // 饶恕结算：不是胜利、不掉道具，只在卡牌下标「饶恕」
+      ST_SPARE=15,                    // 饶恕结算：不是胜利、不掉道具，只在卡牌下标「饶恕」
+      ST_SYNC=16;                     // 存档搬运：导出 / 导入一盘存档码（换电脑用）
 // 我的房间：独立场景，不参与战斗状态机。用负数，避免命中所有 g_state>=ST_INTRO 的战斗判断
 const ST_ROOM=-1;
 const SM_NONE=0, SM_ACT=1, SM_ITEM=2, SM_MERCY=3;
@@ -213,6 +214,8 @@ let g_nameBlink = 0;
 let g_login = { user:"", pwd:"", sel:0, err:"", lock:false };
 // 设密码页状态（给无密码的老存档补一个 / 改密码）
 let g_setpwd = { pwd:"", pwd2:"", sel:0, err:"", ok:"" };
+// 存档搬运页状态（0=导出，1=导入）
+let g_sync = { tab:0, who:"", code:"", err:"", over:"", ok:"" };
 
 // ---------------- 账号（一个浏览器可存多份存档） ----------------
 // 新存档 = 名字 + 密码 + 外貌 + 通关记录；进去要登录。
@@ -475,18 +478,25 @@ async function netRtcOnSignal(m){
 }
 
 function netConnect(){
-  if (typeof mqtt==="undefined") return;           // CDN 加载失败 → 离线单人
+  if (typeof mqtt==="undefined"){                  // 联机库还没到（CDN 慢 / 被拦）→ 过一会儿再试
+    net.libTries = (net.libTries||0) + 1;
+    net.libOk = net.libTries>12 ? false : null;
+    if (net.libTries<=12) setTimeout(netConnect, 1500);
+    return;
+  }
+  net.libOk = true; net.libTries = 0;
+  if (net.cli){ try { net.cli.end(true); } catch(e){} net.cli = null; }
   const url = NET_URLS[0];
   try {
     net.cli = mqtt.connect(url, {
       clientId:"sjc_"+net.cid+"_"+Math.random().toString(36).slice(2,6),
       clean:true, keepalive:30, reconnectPeriod:4000, connectTimeout:8000 });
     net.cli.on("connect", ()=>{
-      net.on=true; net.retryAt=0;
+      net.on=true; net.retryAt=0; net.fails=0;
       net.cli.subscribe([NET_BASE+"/p/#", NET_BASE+"/i/"+net.cid, NET_BASE+"/t/"+net.cid], ()=>{});
     });
-    net.cli.on("close", ()=>{ net.on=false; });
-    net.cli.on("error", ()=>{ netRetryConnect(); });
+    net.cli.on("close", ()=>{ net.on=false; net.fails=(net.fails||0)+1; });
+    net.cli.on("error", ()=>{ net.fails=(net.fails||0)+1; netRetryConnect(); });
     net.cli.on("message", (topic, payload)=>{
       let m; try { m=JSON.parse(payload.toString()); } catch(e){ return; }
       netMsg(topic, m);
@@ -494,14 +504,31 @@ function netConnect(){
     setTimeout(()=>{ if (!net.on) netRetryConnect(); }, 9000);
   } catch(e){ net.on=false; netRetryConnect(); }
 }
-function netRetryConnect(){                          // 连不上就重连同一个 broker（换 broker 会导致两端互相看不见）
+function netRetryConnect(force){                     // 连不上就重连同一个 broker（换 broker 会导致两端互相看不见）
   if (net.on) return;
   const now=Date.now();
-  if (net.retryAt && now-net.retryAt<8000) return;   // 别堆定时器
+  if (!force && net.retryAt && now-net.retryAt<8000) return;   // 别堆定时器
   net.retryAt=now;
   try { net.cli && net.cli.end(true); } catch(e){}
   net.on=false;
-  setTimeout(()=>{ net.retryAt=0; if (!net.on) netConnect(); }, 2500);
+  setTimeout(()=>{ net.retryAt=0; if (!net.on) netConnect(); }, force?200:2500);
+}
+// 右下角那行状态：以前离线时整块都不画，CDN 没加载 / 连不上 broker 的电脑就什么都看不到
+function netStatusText(){
+  if (net.on) return "● 在线 " + netOnline();
+  if (typeof mqtt==="undefined") return "○ 联机组件没加载";
+  if ((net.fails||0) >= 2) return "○ 联机连不上";
+  return "○ 连接中…";
+}
+function netUserRetry(){                             // 点右下角状态：手动重连
+  net.fails = 0; net.libTries = 0; net.libOk = null;
+  if (typeof mqtt==="undefined"){
+    Say("联机组件还没加载出来（被网络拦了），稍后自动再试");
+    netConnect();
+    return;
+  }
+  netRetryConnect(true);
+  Say(net.on ? "联机正常" : "正在重连联机服务…");
 }
 function netMsg(topic, m){
   if (topic.startsWith(NET_BASE+"/p/")){                 // presence
@@ -2105,7 +2132,7 @@ function vpadHit(x,y){                           // 命中的按键 id
 }
 function pressBack(){                            // B：返回 / 取消
   if (g_state===ST_ROOM){ pressKey("x"); return; }
-  if (g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD){ pressKey("x"); return; }
+  if (g_state===ST_CREATE || g_state===ST_LOGIN || g_state===ST_SETPWD || g_state===ST_SYNC){ pressKey("x"); return; }
   if (g_pauseUI){ closePause(); playSfx("snd_menu_move"); return; }
   if (g_state===ST_PAUSE){ g_state=g_pauseFrom; playSfx("snd_menu_move"); return; }
   if (net.invite){ netDeclineInvite(); return; }
@@ -2143,6 +2170,30 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     if (vk==="x"||vk==="Escape"){
       if (!g_login.lock && g_accountKey){ hideInput(); playSfx("snd_menu_move"); GoTitle(); }
       else g_login.err = "要先登录才能进";
+    }
+    return;
+  }
+  // ---- 存档搬运（导出 / 导入）
+  if (g_state===ST_SYNC){
+    if (vk==="Tab"){ g_sync.tab = 1-g_sync.tab; g_sync.err=""; g_sync.over=""; g_sync.ok="";
+      playSfx("snd_menu_move");
+      if (g_sync.tab===1 && !isTouch) focusInput(); else hideInput();
+      return;
+    }
+    if (vk==="ArrowLeft" || vk==="ArrowRight"){
+      g_sync.tab = vk==="ArrowLeft" ? 0 : 1; g_sync.err=""; g_sync.over=""; g_sync.ok="";
+      playSfx("snd_menu_move");
+      if (g_sync.tab===1 && !isTouch) focusInput(); else hideInput();
+      return;
+    }
+    if (vk==="z"||vk==="Enter"){
+      if (g_sync.tab===1) doImportSave(); else doExportCopy();
+      return;
+    }
+    if (vk==="x"||vk==="Escape"||vk==="b"){
+      hideInput(); g_inputMode=""; playSfx("snd_menu_move");
+      openLogin(g_sync.prevUser || g_accountKey || "", !!g_sync.lock);
+      return;
     }
     return;
   }
@@ -2475,6 +2526,13 @@ function rightText(s, rx, y, size, color, bold=true){   // 以 rx 为右边界�
   const w = ctx.measureText(s).width;
   outlineText(s, rx-w/2, y, size, color, rx-w/2, bold);
 }
+function rightPillText(s, rx, y, size, color){          // 带一层半透明底：战斗背景很亮时也看得清
+  ctx.font = `bold ${size}px "Microsoft YaHei","PingFang SC",sans-serif`;
+  const w = ctx.measureText(s).width + 16;
+  ctx.fillStyle = "rgba(10,8,20,0.55)";
+  roundRect(rx-w, y-4, w, size+9, 7); ctx.fill();
+  rightText(s, rx-8, y, size, color);
+}
 
 // ---- 道具小图标（纯矢量，尺寸按 s 缩放，中心 cx,cy）
 function drawItemIcon(key, cx, cy, s){
@@ -2731,6 +2789,7 @@ if (nameIn){
     else if (g_inputMode==="createPwd")  g_createPwd = v.slice(0,16);
     else if (g_inputMode==="setPwd")     g_setpwd.pwd  = v.slice(0,16);
     else if (g_inputMode==="setPwd2")    g_setpwd.pwd2 = v.slice(0,16);
+    else if (g_inputMode==="syncCode"){  g_sync.code = v.slice(0,600); g_sync.over = ""; syncCheck(); }
     else                                 g_createName = v.slice(0,12);
     g_login.err = ""; g_createErr = ""; g_setpwd.err = "";
   });
@@ -2783,7 +2842,15 @@ function doLogin(){
   if (!u){ g_login.err = "请输入用户名"; return; }
   const accounts = loadAccounts();
   const acc = accounts[u];
-  if (!acc){ g_login.err = "没有这个用户名，去「新建存档」吧"; return; }
+  if (!acc){
+    const all = Object.keys(accounts);
+    g_login.err = all.length
+      ? `这台电脑没有「${u}」的存档（只有 ${all.slice(0,3).join("、")}）`
+      : "这台电脑还没存档：存档只在本机浏览器，换电脑要「搬运」";
+    g_login.pwd = ""; g_inputMode = "";
+    playSfx("snd_menu_move");
+    return;
+  }
   if (acc.pwd && acc.pwd !== hashPwd(p)){ g_login.err = "密码不对，再试一次"; g_login.pwd=""; g_inputMode=""; return; }
   if (!applyAccount(u)){ g_login.err = "存档读不出来，再试一次"; return; }
   trustDevice(u);                              // 这台设备记住你：下次打开不用再输密码
@@ -2989,6 +3056,237 @@ function loginBox(x, y, w, h, active, value, placeholder, mask){
     ctx.lineWidth = 4; ctx.strokeRect(x-2,y-2,w+4,h+4);
   }
 }
+// ---------------- 存档搬运（换电脑用） ----------------
+// 存档只存在这台电脑的浏览器里（localStorage），换电脑/换浏览器/清缓存就是一张空表，
+// 所以直接登录必然说「没这个用户名」。这里给一盘「存档码」：旧电脑导出，新电脑粘贴导入，
+// 账号（含密码哈希）原样搬过去，之后照常用用户名 + 密码登录。
+// 码 = SJ1 + 4 位校验 + base64url(JSON)，抄漏几位会直接报「不完整」而不是静默出错。
+const SAVE_CODE_PRE = "SJ1";
+function b64u(bytes){
+  let s = "";
+  for (let i=0;i<bytes.length;++i) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+function unb64u(str){
+  let s = String(str||"").replace(/-/g,"+").replace(/_/g,"/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s), out = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;++i) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function codeSum(body){                       // 4 位 base36 校验：抄漏字符能被发现
+  let h = 5381;
+  for (let i=0;i<body.length;++i) h = (Math.imul(h, 33) + body.charCodeAt(i)) >>> 0;
+  return ("000" + h.toString(36)).slice(-4);
+}
+function encodeSaveCode(acc){
+  if (!acc) return "";
+  const bits = a => [0,1,2,3].map(i => (a && a[i]) ? 1 : 0).join("");
+  const o = { v:1, n:acc.name || "", s:acc.skin|0, p:acc.pwd || "",
+              c:bits(acc.cleared), r:bits(acc.spared) };
+  const body = b64u(new TextEncoder().encode(JSON.stringify(o)));
+  return SAVE_CODE_PRE + codeSum(body) + body;
+}
+function decodeSaveCode(raw){
+  const s = String(raw||"").replace(/\s+/g,"");
+  if (!s) return { err:"先把存档码粘贴到上面的框里" };
+  if (s.length < 14) return { err:"存档码太短，可能没复制全" };
+  if (s.slice(0,3) !== SAVE_CODE_PRE) return { err:"这不是存档码（要以 SJ1 开头）" };
+  const sum = s.slice(3,7), body = s.slice(7);
+  if (codeSum(body) !== sum) return { err:"存档码不完整：少复制或多了字符" };
+  let o;
+  try { o = JSON.parse(new TextDecoder().decode(unb64u(body))); }
+  catch(e){ return { err:"存档码读不出来，可能复制时被打乱了" }; }
+  if (!o || typeof o!=="object") return { err:"存档码读不出来" };
+  const name = String(o.n||"").replace(/\s+/g," ").trim().slice(0,12);
+  if (!name) return { err:"存档码里没有名字" };
+  const skin = o.s|0;
+  if (!(skin>=0 && skin<CHARS.length)) return { err:"存档码里的角色对不上，可能来自别的版本" };
+  const pwd = typeof o.p==="string" ? o.p.slice(0,16) : "";
+  const b2 = v => [0,1,2,3].map(i => String(v||"")[i]==="1");
+  return { acc:{ name, skin, pwd, cleared:b2(o.c), spared:b2(o.r) } };
+}
+function wrapCode(s, n){
+  const out = [];
+  for (let i=0;i<s.length;i+=n) out.push(s.slice(i, i+n));
+  return out;
+}
+function fallbackCopy(t){
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = t; ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (ok){ setToast("存档码已复制", "#8ff0b8"); playSfx("snd_menu_select"); }
+    else setToast("复制失败：手动选中框里的码", "#ff9cae");
+  } catch(e){ setToast("复制失败：手动选中框里的码", "#ff9cae"); }
+}
+function copyText(t){
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(t).then(
+        ()=>{ setToast("存档码已复制，去新电脑粘贴", "#8ff0b8"); playSfx("snd_menu_select"); },
+        ()=>fallbackCopy(t));
+      return;
+    }
+  } catch(e){}
+  fallbackCopy(t);
+}
+function openSync(tab){
+  g_inputMode = "";
+  const names = Object.keys(loadAccounts());
+  const fromLogin = (g_state===ST_LOGIN);
+  g_sync = { tab: tab?1:0, who: g_accountKey || names[0] || "",
+             code:"", err:"", over:"", ok:"",
+             lock: fromLogin ? !!g_login.lock : false,
+             prevUser: fromLogin ? (g_login.user||"") : "" };
+  g_state = ST_SYNC; g_stateT = 0;
+  Say(""); BgmStop(); crtDirty = true;
+  if (g_sync.tab===1 && !isTouch) setTimeout(()=>focusInput(), 60);
+}
+function syncCycleWho(){
+  const names = Object.keys(loadAccounts());
+  if (names.length < 2) return;
+  const i = names.indexOf(g_sync.who);
+  g_sync.who = names[(i+1) % names.length];
+  g_sync.err = ""; g_sync.ok = ""; g_sync.over = "";
+  playSfx("snd_menu_move");
+}
+function doExportCopy(){
+  const acc = loadAccounts()[g_sync.who];
+  if (!acc){ g_sync.err = "这台电脑上没有可导出的存档"; playSfx("snd_menu_move"); return; }
+  copyText(encodeSaveCode(acc));
+}
+function downloadSaveCode(){
+  const acc = loadAccounts()[g_sync.who];
+  if (!acc){ g_sync.err = "这台电脑上没有可导出的存档"; return; }
+  try {
+    const txt = "sanjiao 存档码\n存档：" + acc.name + "\n导出时间：" + new Date().toLocaleString() +
+                "\n\n" + encodeSaveCode(acc) + "\n";
+    const a = document.createElement("a");
+    const url = URL.createObjectURL(new Blob([txt], {type:"text/plain;charset=utf-8"}));
+    a.href = url; a.download = "sanjiao-" + (acc.name||"save") + ".txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+    setToast("存档文件已下载", "#8ff0b8"); playSfx("snd_menu_select");
+  } catch(e){ g_sync.err = "下载失败，用「复制存档码」"; }
+}
+function syncCheck(){                          // 一边粘贴一边校验，别等点了导入才报错
+  if (!g_sync.code){ g_sync.err = ""; g_sync.ok = ""; return null; }
+  const r = decodeSaveCode(g_sync.code);
+  if (r.err){ g_sync.err = r.err; g_sync.ok = ""; return null; }
+  const n = r.acc.cleared.filter(Boolean).length, sp = r.acc.spared.filter(Boolean).length;
+  g_sync.err = "";
+  g_sync.ok = `认出来了：${r.acc.name}（打赢 ${n} 个${sp ? " · 饶恕 " + sp + " 个" : ""}）`;
+  return r.acc;
+}
+function doImportSave(){
+  if (!g_sync.code){ g_sync.err = "先粘贴存档码"; playSfx("snd_menu_move"); return; }
+  const r = decodeSaveCode(g_sync.code);
+  if (r.err){ g_sync.err = r.err; g_sync.over = ""; playSfx("snd_menu_move"); return; }
+  const acc = r.acc, accounts = loadAccounts();
+  if (accounts[acc.name] && g_sync.over !== acc.name){   // 覆盖本机同名存档要按两次
+    g_sync.over = acc.name;
+    g_sync.err = `这台电脑已经有「${acc.name}」，再点一次「导入」就覆盖它`;
+    playSfx("snd_menu_move"); return;
+  }
+  accounts[acc.name] = acc;
+  saveAccounts(accounts);
+  g_sync.over = "";
+  applyAccount(acc.name);
+  trustDevice(acc.name);
+  hideInput(); g_inputMode = "";
+  playSfx("snd_menu_select");
+  setToast(`存档「${acc.name}」搬过来了`, "#8ff0b8");
+  GoTitle();
+}
+
+function RenderSync(){
+  const bg0 = img("bg");
+  if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
+  else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
+  const cx = WINW/2;
+  const names = Object.keys(loadAccounts());
+  outlineText("存 档 搬 运", 0, 20+VOY, 38, "#ffec78", cx);
+  outlineText("存档只保存在这台电脑的浏览器里，换电脑不会自动同步", 0, 74+VOY, 13, "#9fb4e8", cx, false);
+
+  // ---- 两个页签
+  const tw = Math.min(210, (WINW-90)/2), ty = 106+VOY, th = 38;
+  const tabs = ["导出到新电脑", "从旧电脑导入"];
+  for (let i=0;i<2;++i){
+    const tx = cx - tw - 8 + i*(tw+16);
+    const on = g_sync.tab===i;
+    ctx.fillStyle = on ? "rgba(78,60,120,0.95)" : "rgba(22,18,34,0.8)";
+    ctx.strokeStyle = on ? "#ffe878" : "rgba(140,150,190,0.5)";
+    ctx.lineWidth = on ? 2.5 : 1.5;
+    roundRect(tx, ty, tw, th, 8); ctx.fill(); ctx.stroke();
+    outlineText(tabs[i], 0, ty+9, 16, on ? "#fff3a8" : "#b9c2da", tx+tw/2, on);
+    hot(tx-4, ty-4, tw+8, th+8, ()=>{ if (g_sync.tab!==i){ g_sync.tab=i; g_sync.err=""; g_sync.over="";
+        playSfx("snd_menu_move"); if (i===1 && !isTouch) focusInput(); else hideInput(); } });
+  }
+
+  const bw = Math.min(540, WINW-70), bx = cx-bw/2;
+
+  if (g_sync.tab===0){
+    // ---- 导出：挑一个存档 → 显示存档码
+    const acc = loadAccounts()[g_sync.who];
+    const who = acc ? acc.name : "（这台电脑还没有存档）";
+    outlineText(`存档：${who}${names.length>1 ? "　（点这里换一个）" : ""}`, bx, 158+VOY, 14,
+                acc ? "#cfe0ff" : "#ff9cae", -1, false);
+    if (names.length>1) hot(bx-6, 154+VOY, bw, 22, syncCycleWho);
+
+    const code = acc ? encodeSaveCode(acc) : "";
+    const boxY = 184+VOY, boxH = 116;
+    ctx.fillStyle="rgba(12,10,24,0.9)"; ctx.fillRect(bx, boxY, bw, boxH);
+    ctx.strokeStyle="rgba(140,160,220,0.6)"; ctx.lineWidth=1.5; ctx.strokeRect(bx, boxY, bw, boxH);
+    if (code){
+      const per = Math.max(24, Math.floor((bw-30)/7.2));   // 11px 粗体大约 7.2px 宽
+      const lines = wrapCode(code, per).slice(0, 6);
+      lines.forEach((ln,i)=>outlineText(ln, bx+12, boxY+10+i*17, 11, "#a8e8ff", -1, false));
+    } else {
+      outlineText("先建一个存档，再来导出", bx+14, boxY+44, 14, "#8a92b0", -1, false);
+    }
+
+    const byy = boxY+boxH+10;
+    const w1 = 150, w2 = 132;
+    if (acc){
+      btn(bx, byy, w1, 36, "复 制", doExportCopy);
+      roundRect(bx+w1+12, byy, w2, 36, 8);
+      ctx.fillStyle="rgba(46,58,86,0.9)"; ctx.fill();
+      ctx.strokeStyle="#7fa0d0"; ctx.lineWidth=2; ctx.stroke();
+      outlineText("下载文件", 0, byy+9, 15, "#cfe0ff", bx+w1+12+w2/2);
+      hot(bx+w1+6, byy-6, w2+12, 48, downloadSaveCode);
+    }
+    outlineText(isTouch ? "复制后发到新电脑：微信 / 备忘录 / 邮件都行"
+                        : "复制后发到新电脑（聊天、邮件、备忘录都行）",
+                bx, 356+VOY, 12, "#8fa0c8", -1, false);
+    outlineText("新电脑上打开游戏 → 左上角「登录」→「搬运」→「从旧电脑导入」",
+                bx, 376+VOY, 12, "#8fa0c8", -1, false);
+    outlineText("这串码就是你的存档，别发给别人（谁拿到都能登）", bx, 396+VOY, 12, "#ffb0b0", -1, false);
+  } else {
+    // ---- 导入：粘贴 → 校验 → 导入
+    const iy = 162+VOY, ih = 58;
+    const shown = g_sync.code ? g_sync.code.slice(0, 30) + "…（" + g_sync.code.length + " 个字符）" : "";
+    loginBox(bx, iy, bw, ih, true, shown, "在这里粘贴存档码（SJ1 开头）", false);
+    placeInput("syncCode", g_sync.code, bx, iy, bw, ih, 600);
+    hot(bx, iy, bw, ih, ()=>{ setInputMode("syncCode", g_sync.code, 600, true); focusInput(); });
+
+    const msg = g_sync.err || g_sync.ok;
+    if (msg) outlineText(msg, 0, iy+ih+8, 13, g_sync.err ? "#ff8a8a" : "#8ff0b8", cx, false);
+
+    btn(cx-80, iy+ih+34, 160, 42, "导 入", doImportSave);
+
+    outlineText(isTouch ? "点上面的框，长按粘贴" : "点上面的框，Ctrl+V 粘贴（整段粘，别删空格）",
+                bx, iy+ih+92, 12, "#8fa0c8", -1, false);
+    outlineText("导入后照常输用户名 + 原来那个密码登录", bx, iy+ih+112, 12, "#8fa0c8", -1, false);
+    outlineText("存档码来自你自己信任的电脑：里面就是你的通关记录", bx, iy+ih+132, 12, "#8fa0c8", -1, false);
+  }
+
+  const hintY = Math.min(WINH-26, 430+VOY);        // 竖屏 VOY 会把内容推下去，别把提示甩到屏幕最底
+  outlineText(isTouch ? "B 返回" : "B / ESC 返回　·　Tab 切换页签", 0, hintY, 12, "#8ea2d8", cx, false);
+}
+
 function RenderLogin(){
   const bg0 = img("bg");
   if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
@@ -3015,30 +3313,41 @@ function RenderLogin(){
     setInputMode("loginPwd", g_login.pwd, 16, true); focusInput();
   });
 
-  if (g_login.err) outlineText(g_login.err, 0, 288+VOY, 14, "#ff8a8a", cx, false);
+  const allNames = Object.keys(loadAccounts());
+  if (g_login.err) outlineText(g_login.err, 0, 288+VOY, 13, "#ff8a8a", cx, false);
+  else if (!allNames.length)
+    outlineText("这台电脑还没有存档：换电脑要用「搬运」把旧存档导进来", 0, 288+VOY, 13, "#ffd257", cx, false);
+  else if (g_login.user && !allNames.includes(g_login.user.replace(/\s+/g," ").trim()))
+    outlineText(`这台电脑上有：${allNames.slice(0,4).join(" / ")}${allNames.length>4?" …":""}`,
+                0, 288+VOY, 12, "#8fa0c8", cx, false);
 
-  // 进入 / 新建 / 给当前存档设密码
-  const bwd = Math.min(150, (WINW-120)/3), gap = 18;
-  const bx0 = cx - (bwd*3+gap*2)/2;
-  btn(bx0,                  316+VOY, bwd, 44, "进 入",       ()=>{ playSfx("snd_menu_select"); doLogin(); });
-  btn(bx0+bwd+gap,          316+VOY, bwd, 44, "新 建 存 档", ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); });
+  // 进入 / 新建 / 给当前存档设密码 / 搬运存档（换电脑）
+  const bwd = Math.min(122, (WINW-80)/4), gap = 12;
+  const bx0 = cx - (bwd*4+gap*3)/2;
+  const byBtn = 308+VOY;
+  btn(bx0,               byBtn, bwd, 44, "进　入",  ()=>{ playSfx("snd_menu_select"); doLogin(); }, 17);
+  btn(bx0+bwd+gap,       byBtn, bwd, 44, "新　建",  ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); }, 17);
   const cur = loadAccounts()[g_accountKey];
-  btn(bx0+(bwd+gap)*2,      316+VOY, bwd, 44, (cur && cur.pwd) ? "改 密 码" : "设 密 码",
-      ()=>{ playSfx("snd_menu_select"); if (!openSetPwd()) g_login.err = "先登录一个存档，再给它设密码"; });
+  btn(bx0+(bwd+gap)*2,   byBtn, bwd, 44, (cur && cur.pwd) ? "改密码" : "设密码",
+      ()=>{ playSfx("snd_menu_select"); if (!openSetPwd()) g_login.err = "先登录一个存档，再给它设密码"; }, 17);
+  btn(bx0+(bwd+gap)*3,   byBtn, bwd, 44, "搬　运",
+      ()=>{ playSfx("snd_menu_select"); openSync(allNames.length ? 0 : 1); }, 17);
 
   if (g_accountKey && !g_login.lock)
     outlineText(`当前存档：${g_accountKey}${(cur && cur.pwd) ? "（已设密码）" : "（还没有密码）"}`,
-                0, 372+VOY, 12, (cur && cur.pwd) ? "#8ff0b8" : "#ffd257", cx, false);
+                0, 364+VOY, 12, (cur && cur.pwd) ? "#8ff0b8" : "#ffd257", cx, false);
 
-  if (g_login.lock) outlineText("输入这个存档的密码才能进入", 0, 394+VOY, 13, "#8ea2d8", cx, false);
-  else              outlineText(isTouch?"B 返回":"X / ESC 返回", 0, 394+VOY, 13, "#8ea2d8", cx, false);
-  outlineText(isTouch?"↑ ↓ 切换　A 进入":"↑ ↓ 切换　Z 进入", 0, 418+VOY, 13, "#b4d2ff", cx, false);
+  if (g_login.lock) outlineText("输入这个存档的密码才能进入", 0, 386+VOY, 13, "#8ea2d8", cx, false);
+  else              outlineText(isTouch?"B 返回":"X / ESC 返回", 0, 386+VOY, 13, "#8ea2d8", cx, false);
+  outlineText(isTouch?"↑ ↓ 切换　A 进入":"↑ ↓ 切换　Z 进入", 0, 408+VOY, 13, "#b4d2ff", cx, false);
+  if (!g_login.lock)
+    outlineText("换电脑登录不了？点「搬运」：旧电脑导出，这台导入", 0, 432+VOY, 12, "#7f92c4", cx, false);
 
   // 忘记密码的安全出口：清掉本机密码（存档数据不删），免得把自己永久锁在外面
   if (g_login.lock){
     outlineText(g_login.wipeAsk ? "再点一次：清除本机密码并进入" : "忘记密码？点这里清除本机密码",
-                0, 442+VOY, 12, g_login.wipeAsk ? "#ff9a9a" : "#7f92c4", cx, false);
-    hot(cx-130, 438+VOY, 260, 18, ()=>{ askWipePwd(); });
+                0, 432+VOY, 12, g_login.wipeAsk ? "#ff9a9a" : "#7f92c4", cx, false);
+    hot(cx-130, 428+VOY, 260, 18, ()=>{ askWipePwd(); });
   }
 }
 
@@ -3827,11 +4136,11 @@ function RenderPause(){
   if (!isTouch) outlineText("↑ ↓ 选择　Z 确认　ESC 继续", 0, 430+VOY, 15, "#bec8cd", WINW/2, false);
 }
 // 简单按钮（描边圆角）
-function btn(x,y,w,h,label,fn){
+function btn(x,y,w,h,label,fn,fs){
   ctx.fillStyle="rgba(60,50,90,0.9)";
   ctx.strokeStyle="#9a8ec0"; ctx.lineWidth=2;
   roundRect(x,y,w,h,8); ctx.fill(); ctx.stroke();
-  outlineText(label, 0, y+h/2-11, 20, "#fff", x+w/2);
+  outlineText(label, 0, y+h/2-(fs||20)*0.55, fs||20, "#fff", x+w/2);
   hot(x-6,y-6,w+12,h+12,fn);
 }
 function roundRect(x,y,w,h,r){
@@ -3852,10 +4161,11 @@ function Render(){
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0,0,WINW,WINH);
 
-  if (g_state!==ST_CREATE && g_state!==ST_LOGIN && g_state!==ST_SETPWD) hideInput();
+  if (g_state!==ST_CREATE && g_state!==ST_LOGIN && g_state!==ST_SETPWD && g_state!==ST_SYNC) hideInput();
   if (g_state===ST_CREATE){ RenderCreate(); drawVPad(); return; }
   if (g_state===ST_LOGIN){ RenderLogin(); drawVPad(); return; }
   if (g_state===ST_SETPWD){ RenderSetPwd(); drawVPad(); return; }
+  if (g_state===ST_SYNC){ RenderSync(); drawVPad(); return; }
   if (g_state===ST_ROOM){ RenderRoom(); drawVPad(); return; }
   if (g_state===ST_TITLE){ RenderTitle(); drawAvatar(); drawVPad(); return; }
   if (g_state===ST_PAUSE){                 // 暂停只画背景 + 菜单，避免战斗画面文字叠影
@@ -4574,7 +4884,8 @@ function mySoulImg(){ return isMember() ? (soulBlueImg()||img("soul")) : img("so
 function partnerSoulImg(){ return isMember() ? img("soul") : (soulBlueImg()||img("soul")); }
 
 function renderNetHUD(uiBot){
-  if (!net.on && !net.role) return;          // 离线且未组队时不显示
+  // 离线也画这行状态。以前 `if (!net.on && !net.role) return;` 会让 CDN 没加载 /
+  // 连不上 broker 的电脑右下角一片空白，看起来像「在线人数没了」。
   // ---- 邀请横幅（顶部）
   if (net.invite){
     const bw=340, bx=WINW/2-bw/2, by=8;
@@ -4593,36 +4904,41 @@ function renderNetHUD(uiBot){
   // ---- 在线人数 / 队伍状态
   // 手机：右下角整块让给 A/B 拇指区 → 挪到右上角（战斗时贴在暂停键下方）
   const oc=netOnline();
+  const stTxt=netStatusText();
   const lh=17;
   const inBattle = uiBot!==undefined && g_state!==ST_TITLE && g_state!==ST_MENU;
-  const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#8a8a9a";
+  const st = net.on ? (net.role ? "#ffd257" : "#7dffa8") : "#9aa2bc";
   let hy, panelTop;
   if (isTouch){
     // 右上角被角色头像占了 → 在线/队伍信息排在头像下面（标题界面还要给「改名」让一行）
     hy = AVATAR.on ? (AVATAR.y + AVATAR.h + AVATAR.pad + 5*VSC)
                    : ((g_state>=ST_INTRO && g_state!==ST_TITLE) ? 46 : 6);
-    rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 14, st);
+    rightPillText(stTxt, WINW-10, hy-2, 13, st);
     if (net.role){
       const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
       rightText(tag+" 与 "+net.partnerName, WINW-10, hy+17, 11, "#c9d2e8");
       rightText("点此退队", WINW-10, hy+31, 10, "#8fa0c8");
       hot(WINW-212, hy+13, 204, 32, netLeave);        // 手机：点队伍状态退队
     }
-    if (g_state===ST_TITLE || g_state===ST_MENU)
-      hot(WINW-160, hy-8, 154, 26, ()=>{ net.panel=!net.panel; net.selIdx=0; });
+    if ((g_state===ST_TITLE || g_state===ST_MENU) && !net.role)
+      hot(WINW-160, hy-8, 154, 26, ()=>{
+        if (net.on){ net.panel=!net.panel; net.selIdx=0; } else netUserRetry();
+      });
     panelTop = hy + (net.role?48:24);                 // 面板从信息块下方展开
   } else {
     const bot = inBattle ? uiBot-56 : WINH-14;
     const nLines = 1 + (net.role ? 1 : 0);
     hy = bot - (15 + (nLines-1)*lh);
-    rightText((net.on?"● ":"○ ")+"在线 "+oc, WINW-10, hy, 15, st);
+    rightPillText(stTxt, WINW-10, hy-2, 14, st);
     if (net.role){
       const tag = (isLeader() ? "红心·队长" : "蓝心·队员") + (net.dcOk ? " ·直连" : " ·中转");
       rightText(tag+"  与 "+net.partnerName, WINW-10, hy+lh, 12, "#c9d2e8");
     }
-    // 在线人数可点（开/关玩家面板）
-    if (g_state===ST_TITLE || g_state===ST_MENU)
-      hot(WINW-150, hy-8, 144, 26, ()=>{ net.panel=!net.panel; net.selIdx=0; });
+    // 在线人数可点（开/关玩家面板；离线时点它重连）
+    if ((g_state===ST_TITLE || g_state===ST_MENU) && !net.role)
+      hot(WINW-150, hy-8, 144, 26, ()=>{
+        if (net.on){ net.panel=!net.panel; net.selIdx=0; } else netUserRetry();
+      });
     panelTop = hy-10;
   }
   // ---- 玩家面板
