@@ -64,7 +64,12 @@
     return btoa(bin).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
   }
 
-  f.src = CLOUD + packOld();
+  // 每次带一个时间戳，避免浏览器拿缓存的旧入口页（入口只有几 KB）
+  function buildSrc(){
+    return CLOUD + (CLOUD.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now() + packOld();
+  }
+
+  f.src = buildSrc();
   f.addEventListener("load", function(){ try { f.focus(); } catch(e){} });
 
   // ---- 游戏就绪后撤掉过渡层
@@ -87,7 +92,7 @@
     if (document.visibilityState === "visible" && document.body.classList.contains("bad")) {
       document.body.classList.remove("bad");
       got = false; t0 = Date.now();
-      f.src = CLOUD;
+      f.src = buildSrc();
       setTimeout(function(){ if (!got) document.body.classList.add("bad"); }, 18000);
     }
   });
