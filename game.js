@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261109e";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261109f";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -460,20 +460,34 @@ function pickLocalSave(){                     // 云端还没存档时，把本�
 function cloudUidOf(user){
   return (user && (user.id || user.uid || user.userId)) || g_cloud.uid || "me";
 }
+function cloudScore(p){                       // 进度完成度：通关算 2 分、饶恕算 1 分
+  if (!p) return -1;
+  const c = (p.cleared||[]).filter(Boolean).length;
+  const s = (p.spared||[]).filter(Boolean).length;
+  return c*2 + s;
+}
 async function cloudEnter(user){              // 登录/注册成功 → 取云端存档 → 进标题
   try { localStorage.removeItem(LOGOUT_KEY); } catch(e){}
   g_cloud.uid = cloudUidOf(user);
   g_cloud.email = (user && user.email) || (g_login.user||g_su.email||"").trim().toLowerCase();
   g_login.ok = "正在取回云端存档…";
   const data = await cloudPull();
+  const local = pickLocalSave();
   g_login.ok = "";
   if (data && data.prof){
+    // 两边都有档时取进度更全的那份，免得换了链接/设备之后看着像「存档没了」
+    if (local && cloudScore(local) > cloudScore(data.prof)){
+      cloudApply({ v:1, prof: local, room: localRoom() });
+      cloudPushSoon(200);
+      hideInput(); playSfx("snd_menu_select"); Say(""); GoTitle();
+      setToast("本机进度比云端多，已用本机存档并同步", "#ffd257");
+      return true;
+    }
     cloudApply(data);
     hideInput(); playSfx("snd_menu_select"); Say(""); GoTitle();
     setToast("云端存档已就位", "#8ff0b8");
     return true;
   }
-  const local = pickLocalSave();
   if (local){
     cloudApply({ v:1, prof: local, room: localRoom() });
     cloudPushSoon(200);
