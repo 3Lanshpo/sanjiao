@@ -1,131 +1,97 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>sanjiao - Boss战</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0715">
+<title>混沌挑战 Boss战</title>
 <style>
-  html, body {
-    margin: 0; padding: 0; width: 100%; height: 100%;
-    background: #0c0616; overflow: hidden;
-    touch-action: none; -webkit-user-select: none; user-select: none;
-    -webkit-touch-callout: none; overscroll-behavior: none;
-  }
-  :root { --sab: env(safe-area-inset-bottom, 0px); }
-  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; background: #0c0616; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
-  #loading {
-    position: fixed; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; color: #ffec80;
-    font-family: "Microsoft YaHei", sans-serif;
-    font-size: 18px; gap: 14px; z-index: 10; background: #000;
-  }
-  #lbar { width: 240px; height: 10px; border: 2px solid #8899bb; border-radius: 6px; overflow: hidden; }
-  #lfill { height: 100%; width: 0%; background: linear-gradient(90deg,#78c8ff,#b478ff); transition: width .15s; }
-  #rotate {
-    display: none; position: fixed; left: 0; right: 0; bottom: 10px;
-    text-align: center; color: #9fb4d8; font-size: 13px;
-    font-family: "Microsoft YaHei", sans-serif; pointer-events: none; z-index: 20;
-  }
-  /* 起名输入：看不见的输入框，摆在画布上名字框的位置，点它就会弹系统键盘 */
-  #nameIn {
-    position: fixed; left: 0; top: 0; width: 0; height: 0;
-    padding: 0; margin: 0; border: 0; outline: 0; border-radius: 0;
-    background: transparent; color: transparent; caret-color: transparent;
-    font-size: 16px;  /* 小于 16px 时 iOS 会在聚焦时缩放页面 */
-    opacity: 0; pointer-events: none; z-index: 5;
-    -webkit-user-select: text; user-select: text;
-  }
+  html,body{margin:0;padding:0;height:100%;background:#0b0715;overflow:hidden;
+    -webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
+  #f{position:fixed;inset:0;width:100%;height:100%;border:0;display:block;background:#0b0715}
+
+  #boot,#tip{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:14px;color:#cfd8f5;background:#0b0715;
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"Microsoft YaHei",sans-serif;text-align:center;padding:26px}
+  #boot{z-index:3}
+  #boot .t{color:#ffec78;font-size:20px;font-weight:700;letter-spacing:2px}
+  #boot .d{color:#8ea2d8;font-size:13px}
+  #tip{display:none;z-index:4}
+  #tip b{color:#ffec78;font-size:19px}
+  #tip .d{color:#9fb4e8;font-size:13.5px;max-width:420px}
+  #tip a{display:inline-block;color:#cfe0ff;text-decoration:none;border:2px solid #7fa0d0;
+    padding:11px 24px;border-radius:10px;font-size:15px;margin-top:4px}
+  body.ready #boot{display:none}
+  body.bad #boot{display:none}
+  body.bad #f{display:none}
+  body.bad #tip{display:flex}
 </style>
 </head>
 <body>
-<div id="wrap"><canvas id="cv"></canvas></div>
-<input id="nameIn" type="text" maxlength="12" autocomplete="off" autocorrect="off"
-       autocapitalize="off" spellcheck="false" enterkeyhint="done" aria-label="名字">
-<div id="rotate">↻ 建议横屏游玩</div>
-<div id="loading">
-  <div>混沌加载中……</div>
-  <div id="lbar"><div id="lfill"></div></div>
-  <div id="lpct" style="font-size:13px;color:#99a">0%</div>
-</div>
-<script>
-  // 联机库（MQTT）以前只挂 unpkg 一个源：那台电脑连不上 unpkg 时 mqtt 就是 undefined，
-  // 右下角「在线」整块不画。这里按顺序试几个源（含国内 360 / 七牛），全挂了游戏照样能玩，
-  // 只是联机不可用；game.js 那边库晚到时也会自动补连。
-  (function () {
-    var MQTT_SRC = [
-      "https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js",
-      "https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js",
-      "https://lib.baomitu.com/mqtt/5.10.1/mqtt.min.js",
-      "https://cdn.staticfile.net/mqtt/5.10.1/mqtt.min.js",
-      "https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"
-    ];
-    // 云账号（WorkBuddy 云服务）：账号和存档都在云端，换电脑输邮箱 + 密码就能登进来。
-    // 和联机库一样多源回退；库没到 / 全挂了，游戏照样能离线玩，只是登录页会提示。
-    var CLOUD_SRC = [
-      "https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js",
-      "https://unpkg.com/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"
-    ];
-    var CLOUD_CFG = {
-      endpoint: "https://chaos-boss-battle.app.workbuddy.host",
-      oauthRelayBaseUrl: "https://www.workbuddy.cn/v2/as/genie-baas/oauth",
-      publishableKey: "wbpk_QYT7bHxXpgPbkMGkpE9RlN_2I4IDhcyja6NcYuqORadOjEVN3xkif2c"
-    };
-    window.__cloudCfg = CLOUD_CFG;
-    function cloudInit() {
-      if (window.__cloud) return true;
-      if (typeof WorkBuddyCloud === "undefined") return false;
-      try {
-        window.__cloud = WorkBuddyCloud.createWorkBuddyCloud(CLOUD_CFG);
-        return true;
-      } catch (e) {
-        window.__cloudErr = String((e && e.message) || e);
-        return false;
-      }
-    }
-    function cloudLoad(i) {
-      if (cloudInit()) return;
-      if (i >= CLOUD_SRC.length) { window.__cloudFail = true; return; }
-      var s = document.createElement("script");
-      s.src = CLOUD_SRC[i];
-      s.async = true;
-      s.onload = function () { if (!cloudInit()) cloudLoad(i + 1); };
-      s.onerror = function () { try { s.remove(); } catch (e) {} cloudLoad(i + 1); };
-      document.head.appendChild(s);
-    }
-    window.__cloudRetry = function () { window.__cloudFail = false; cloudLoad(0); };
+<iframe id="f" allow="autoplay; fullscreen; clipboard-write; gamepad"></iframe>
 
-    var GAME_VER_JS = "20261109c";   // 每次更新 game.js 时同步改这里
-    var booted = false;
-    function boot() {
-      if (booted) return;
-      booted = true;
-      // 线上分享链接靠 ?sharecode=xxx 鉴权，子资源必须带上同一个查询串
-      var q = location.search || "";
-      var s = document.createElement("script");
-      s.src = "game.js?v=" + GAME_VER_JS + (q ? "&" + q.slice(1) : "");   // 版本号变化才重新下载
-      s.onerror = function () {
-        var t = document.getElementById("lpct");
-        if (t) t.textContent = "脚本加载失败，请刷新重试";
-      };
-      document.body.appendChild(s);
+<div id="boot">
+  <div class="t">混沌挑战 Boss战</div>
+  <div class="d">正在进入云端版…</div>
+</div>
+
+<div id="tip">
+  <b>云端版没加载出来</b>
+  <div class="d">网络被挡了一下，或者浏览器拦了跨站页面。刷新再试；也可以先玩离线版，存档留在这台电脑上。</div>
+  <a href="offline.html">玩离线版（存档在本机）</a>
+</div>
+
+<script>
+(function(){
+  var CLOUD = "https://chaos-boss-battle.app.workbuddy.host/?sharecode=7RKWIXSBZX";
+  var f = document.getElementById("f");
+  var got = false, t0 = Date.now();
+
+  // ---- 把旧域名（github.io）里的老存档搬进云端版，只搬一次
+  function packOld(){
+    try {
+      if (localStorage.getItem("__sj_moved") === "1") return "";
+      var pack = {};
+      ["sanjiao_profile_v1","sanjiao_room_v1","sanjiao_current_v1","sanjiao_accounts_v1"]
+        .forEach(function(k){ var v = localStorage.getItem(k); if (v) pack[k] = v; });
+      if (!Object.keys(pack).length) return "";
+      return "#imp=" + b64(JSON.stringify(pack));
+    } catch(e){ return ""; }
+  }
+  function b64(s){
+    var bytes = new TextEncoder().encode(s), bin = "", i;
+    for (i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+  }
+
+  f.src = CLOUD + packOld();
+  f.addEventListener("load", function(){ try { f.focus(); } catch(e){} });
+
+  // ---- 游戏就绪后撤掉过渡层
+  window.addEventListener("message", function(ev){
+    var d = ev.data;
+    if (!d || d.sj !== "ready") return;
+    if (ev.source !== f.contentWindow) return;
+    got = true;
+    document.body.classList.add("ready");
+    try { localStorage.setItem("__sj_moved", "1"); } catch(e){}
+  });
+
+  // ---- 兜底：18 秒还没就绪就提示
+  setTimeout(function(){
+    if (!got && Date.now() - t0 > 17000) document.body.classList.add("bad");
+  }, 18000);
+
+  // ---- 从后台切回来时，若那时是加载失败状态，自动重试一次
+  document.addEventListener("visibilitychange", function(){
+    if (document.visibilityState === "visible" && document.body.classList.contains("bad")) {
+      document.body.classList.remove("bad");
+      got = false; t0 = Date.now();
+      f.src = CLOUD;
+      setTimeout(function(){ if (!got) document.body.classList.add("bad"); }, 18000);
     }
-    function tryLoad(i) {
-      if (typeof mqtt !== "undefined") return boot();      // 某个源已经加载成功
-      if (i >= MQTT_SRC.length) return boot();             // 全部失败：离线也能玩
-      var s = document.createElement("script");
-      s.src = MQTT_SRC[i];
-      s.async = true;
-      s.onload = function () { boot(); };
-      s.onerror = function () { s.remove(); tryLoad(i + 1); };
-      document.head.appendChild(s);
-    }
-    setTimeout(boot, 2500);                                // 兜底：不让 CDN 卡住开局（库晚到 game.js 会自动补连）
-    cloudLoad(0);                                          // 云账号 SDK 并行加载
-    tryLoad(0);
-  })();
+  });
+})();
 </script>
 </body>
 </html>
