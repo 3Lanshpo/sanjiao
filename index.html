@@ -50,19 +50,45 @@
   <div id="lbar"><div id="lfill"></div></div>
   <div id="lpct" style="font-size:13px;color:#99a">0%</div>
 </div>
-<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js" crossorigin="anonymous"></script>
 <script>
-  // 线上分享链接靠 ?sharecode=xxx 鉴权，子资源必须带上同一个查询串
+  // 联机库（MQTT）以前只挂 unpkg 一个源：那台电脑连不上 unpkg 时 mqtt 就是 undefined，
+  // 右下角「在线」整块不画。这里按顺序试几个源（含国内 360 / 七牛），全挂了游戏照样能玩，
+  // 只是联机不可用；game.js 那边库晚到时也会自动补连。
   (function () {
-    var q = location.search || "";
-    var GAME_VER_JS = "20261108a";   // 每次更新 game.js 时同步改这里
-    var s = document.createElement("script");
-    s.src = "game.js?v=" + GAME_VER_JS + (q ? "&" + q.slice(1) : "");   // 版本号变化才重新下载
-    s.onerror = function () {
-      var t = document.getElementById("lpct");
-      if (t) t.textContent = "脚本加载失败，请确认链接带有 sharecode";
-    };
-    document.body.appendChild(s);
+    var MQTT_SRC = [
+      "https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js",
+      "https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js",
+      "https://lib.baomitu.com/mqtt/5.10.1/mqtt.min.js",
+      "https://cdn.staticfile.net/mqtt/5.10.1/mqtt.min.js",
+      "https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"
+    ];
+    var GAME_VER_JS = "20261108b";   // 每次更新 game.js 时同步改这里
+    var booted = false;
+    function boot() {
+      if (booted) return;
+      booted = true;
+      // 线上分享链接靠 ?sharecode=xxx 鉴权，子资源必须带上同一个查询串
+      var q = location.search || "";
+      var s = document.createElement("script");
+      s.src = "game.js?v=" + GAME_VER_JS + (q ? "&" + q.slice(1) : "");   // 版本号变化才重新下载
+      s.onerror = function () {
+        var t = document.getElementById("lpct");
+        if (t) t.textContent = "脚本加载失败，请刷新重试";
+      };
+      document.body.appendChild(s);
+    }
+    function tryLoad(i) {
+      if (typeof mqtt !== "undefined") return boot();      // 某个源已经加载成功
+      if (i >= MQTT_SRC.length) return boot();             // 全部失败：离线也能玩
+      var s = document.createElement("script");
+      s.src = MQTT_SRC[i];
+      s.async = true;
+      s.onload = function () { boot(); };
+      s.onerror = function () { s.remove(); tryLoad(i + 1); };
+      document.head.appendChild(s);
+    }
+    setTimeout(boot, 2500);                                // 兜底：不让 CDN 卡住开局（库晚到 game.js 会自动补连）
+    tryLoad(0);
   })();
 </script>
 </body>
