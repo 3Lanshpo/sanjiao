@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261109a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261109b";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -350,7 +350,9 @@ function cloudErrText(e, fallback){
   const k = (e && (e.kind || e.code || "")) + "";
   const m = (e && (e.message || e.error_description || e.msg || "")) + "";
   const s = (k + " " + m).toLowerCase();
-  if (/network|fetch|timeout|failed to fetch|abort/.test(s)) return "连不上云端，检查一下网络再试";
+  if (/network|fetch|timeout|failed to fetch|abort/.test(s)) return cloudHostOk()
+    ? "连不上云端，检查一下网络再试"
+    : "这个网址不支持云账号，请用 WorkBuddy 分享链接";
   if (/invalid_username_or_password|invalid.*credential|invalid_grant|unauthenticated|incorrect/.test(s)) return "邮箱或密码不对";
   if (/user.*not.*found|no.*user|not.*registered/.test(s)) return "这个邮箱还没注册过，点「注册」";
   if (/rate|too many|429/.test(s)) return "试得太频繁了，等一会儿再来";
@@ -358,6 +360,14 @@ function cloudErrText(e, fallback){
   return (m || k || fallback || "云服务出错，稍后再试").replace(/\s+/g," ").slice(0, 64);
 }
 function cloudEmailOk(s){ return /^[^@\s]{1,64}@[^@\s.]{1,64}\.[^@\s]{2,}$/.test((s||"").trim()); }
+// 云服务端按发布公钥做精确 Origin 校验：只有本应用保留域名（和本地调试）能用云账号
+const CLOUD_HOST = "chaos-boss-battle.app.workbuddy.host";
+function cloudHostOk(){
+  try {
+    const h = String(location.hostname || "").toLowerCase();
+    return h === CLOUD_HOST || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "";
+  } catch(e){ return true; }
+}
 function cloudProfileNow(){
   return { name: g_profile.name || "", skin: g_profile.skin|0,
            cleared: [0,1,2,3].map(i=>!!(g_profile.cleared||[])[i]),
@@ -3580,8 +3590,11 @@ function RenderLogin(){
   if (bg0) ctx.drawImage(bg0, -6, -6, WINW+12, WINH+12);
   else { ctx.fillStyle="rgb(12,8,22)"; ctx.fillRect(0,0,WINW,WINH); }
   const cx = WINW/2;
+  const hostOk = cloudHostOk();
   outlineText("登　录", 0, 24+VOY, 44, "#ffec78", cx);
-  outlineText("账号就是邮箱：换哪台电脑登进来，存档都跟着你", 0, 82+VOY, 14, "#9fb4e8", cx, false);
+  outlineText(hostOk ? "账号就是邮箱：换哪台电脑登进来，存档都跟着你"
+                     : "当前网址不支持云账号，请改用 WorkBuddy 分享链接",
+              0, 82+VOY, 14, hostOk ? "#9fb4e8" : "#ffd257", cx, false);
 
   const bw = Math.min(430, WINW-70), bx = cx-bw/2, bh = 56;
   const uy = 110+VOY, py = 180+VOY;
