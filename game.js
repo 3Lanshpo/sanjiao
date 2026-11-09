@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261109d";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261109e";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -3292,7 +3292,9 @@ function RenderCreate(){
       outlineText(isTouch?"点 这 里 输 入 名 字":"点框里输入名字 或直接打字", 0, by+bh/2-12, 22, "rgba(180,196,230,0.5)", cx, false);
     }
     outlineText(isTouch?"输入完点键盘上的「完成」，或按 A 确定":"输入后按 Z / Enter 确定", 0, 268+VOY, 15, "#b4d2ff", cx, false);
-    outlineText(g_createNew ? "这个名字也是你的登录用户名" : "名字随便起，组队时队友看到的就是它", 0, 294+VOY, 13, "#8ea2d8", cx, false);
+    outlineText(g_cloud.uid ? "这个名字只是游戏里的显示名，登录用邮箱"
+                            : (g_createNew ? "这个名字也是你的登录用户名" : "名字随便起，组队时队友看到的就是它"),
+                0, 294+VOY, 13, "#8ea2d8", cx, false);
     if (g_createErr) outlineText(g_createErr, 0, 320+VOY, 14, "#ff8a8a", cx, false);
   } else if (g_createStage===1){
     const pwd = (nameIn && g_inputMode==="createPwd") ? nameIn.value : (g_createPwd||"");
