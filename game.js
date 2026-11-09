@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261109c";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261109d";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -5575,8 +5575,40 @@ loadFinishCb = ()=>{
   avatarLayout();
   playVoice("Jevil_voiceclip_CHAOS.wav");
   requestAnimationFrame(t=>{ lastT=t; loop(t); });
+  const imp = importFromHash();               // 旧域名页面套 iframe 时，把老存档带过来
+  notifyParent(imp);                          // 告诉外层壳：游戏起来了（可撤掉加载层）
   bootAccount();                              // 账号/存档可能要走网络，先跑起来再决定进哪一页
 };
+
+// ---- 被旧域名页面用 iframe 承载时：接收外层传来的老存档，并回报「已就绪」
+function importFromHash(){
+  let applied = 0;
+  try {
+    const m = (location.hash || "").match(/[#&]imp=([A-Za-z0-9_-]+)/);
+    if (!m) return 0;
+    const b = m[1].replace(/-/g, "+").replace(/_/g, "/");
+    const pad = "===".slice(0, (4 - b.length % 4) % 4);
+    const bin = atob(b + pad);
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    const obj = JSON.parse(new TextDecoder().decode(bytes));
+    if (!localStorage.getItem(SAVE_KEY)){        // 云端版这边还是空的才搬，别覆盖已有进度
+      for (const k of Object.keys(obj)){
+        if (!/^sanjiao_/.test(k)) continue;
+        try { localStorage.setItem(k, obj[k]); } catch(e){}
+      }
+      applied = 1;
+      loadProfile();                             // 内存里的 g_profile 也要同步成搬过来的这份
+    }
+    history.replaceState(null, "", location.pathname + location.search);
+  } catch(e){}
+  return applied;
+}
+function notifyParent(imp){
+  try {
+    if (window.parent && window.parent !== window)
+      window.parent.postMessage({ sj:"ready", imp: imp|0 }, "*");
+  } catch(e){}
+}
 
 async function bootAccount(){
   g_boot = true;
