@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261109f";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261110a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -98,7 +98,7 @@ const Boss = () => BOSSES[g_boss];
 let g_state=ST_TITLE, g_sub=SM_NONE, g_pattern=P_CAROUSEL, g_lastPat=P_SPIRAL;
 let g_stateT=0, g_subSel=0, g_btnSel=0, g_boss=0, g_bossSel=0;
 let g_vol=70, g_pauseFrom=ST_MENU, g_pauseSel=0;
-let g_hp=PLAYER_MAXHP, g_items=3, g_pacify=0, g_turn=0;
+let g_hp=PLAYER_MAXHP, g_items=2, g_pacify=0, g_turn=0;
 let g_jevHp=900, g_jevHpShown=false, g_spareReady=false;
 let g_heartX=BOX_CX, g_heartY=BOX_CY, g_inv=0;
 let g_jevShake=0, g_jevOffX=0, g_jevOffY=0, g_tpTimer=0;
@@ -121,8 +121,10 @@ let g_hbMs=45;                                 // 弹幕阶段传心位置的间
 // 道具运行时：已用次数（每局/每回合重置）+ 本回合生效的增益 + 刚掉落的道具
 let g_gearUse = { scythe:0, tv:0, fuse:0, guitar:0 };
 let g_buff    = { scythe:false, tv:false, fuse:false, guitar:0,
-                  weaken:0, regen:0, chill:false };   // 技能：减攻系数 / 药水剩余回合 / 难度回初始
+                  weaken:0, regen:0, chill:false,
+                  pow:1, powMate:1 };   // 技能：减攻系数 / 药水剩余回合 / 难度回初始 / 力量增强(自己·队友)
 let g_skillUse = 0;            // 角色专属技能本局已用次数（每局一次，ResetGame 清零）
+let g_ralsei = { powAt:-99, wtrAt:-99 };   // Ralsei 两个祈祷技上次使用的回合号（每 4 回合刷新）
 
 // ---------------- 我的房间（空房间：白墙 + 木地板，角色用原版 overworld 走路帧） ----------------
 const ROOM_WALL_Y   = 96;                   // 白墙与木地板的分界（宝可梦视角：墙只占上面一窄条）
@@ -156,7 +158,7 @@ const CHARS = [
   { key:"kris",   label:"KRIS",   img:"char_kris",   frames:6, atk:"atk_kris",   atkN:7, atkS:1.00,
     spd:1.20, dmg:1.00, maxhp:120, passive:"移动速度 +20%" },
   { key:"susie",  label:"SUSIE",  img:"char_susie",  frames:4, atk:"atk_susie",  atkN:6, atkS:1.50,
-    spd:1.00, dmg:1.20, maxhp:120, passive:"造成伤害 +20%" },
+    spd:1.00, dmg:1.20, maxhp:100, passive:"造成伤害 +20%" },
   { key:"ralsei", label:"RALSEI", img:"char_ralsei", frames:5, atk:"atk_ralsei", atkN:6, atkS:1.70,
     spd:1.00, dmg:1.00, maxhp:150, passive:"血量上限 150" },
 ];
@@ -187,6 +189,34 @@ const SKILLS = [
 function mySkill(){ return SKILLS[clamp(g_profile.skin|0, 0, SKILLS.length-1)]; }
 const SKILL_PER_RUN = 1;                       // 每局只能用一次
 function skillLeft(){ return Math.max(0, SKILL_PER_RUN - g_skillUse); }
+// ---------------- Ralsei 的祈祷技（不消耗回合，每 4 回合刷新） ----------------
+// 只有 Ralsei 有；两个技能各自独立冷却，用掉之后要等 4 个回合才能再用。
+const PRAY_CD = 4;
+const PRAY = {
+  pow:{ key:"pow", name:"力量增强", col:"#ffd166", perTxt:"不耗回合 · 队友+35% 自己+10%" },
+  wtr:{ key:"wtr", name:"治疗水弹", col:"#7fe4ff", perTxt:"不耗回合 · 随机伤害/治疗" },
+};
+function isRalsei(){ return (g_profile.skin|0) === 2; }
+function prayLast(k){ return k==="pow" ? g_ralsei.powAt : g_ralsei.wtrAt; }
+function prayCd(k){                            // 还要等几回合（0 = 现在就能用）
+  const last = prayLast(k);
+  if (last < 0) return 0;
+  return Math.max(0, PRAY_CD - (g_turn - last));
+}
+// 力量增强的伤害倍率（自己 +10% / 队友 +35%，都只算本回合）
+function powMul(){ return (g_buff.pow||1) * (g_buff.powMate||1); }
+// ACT 子菜单条目：专属技能 +（Ralsei：两个祈祷技）+ 检查 + 安抚
+function actList(){
+  const sk = mySkill();
+  const L = [{ k:"skill", name:sk.name, col:sk.col }];
+  if (isRalsei()){
+    L.push({ k:"pow", name:PRAY.pow.name, col:PRAY.pow.col });
+    L.push({ k:"wtr", name:PRAY.wtr.name, col:PRAY.wtr.col });
+  }
+  L.push({ k:"check", name:"检查", col:"#ffffff" });
+  L.push({ k:"soothe", name:"安抚", col:"#ffffff" });
+  return L;
+}
 // ---------------- 道具（打赢 Boss 掉落） ----------------
 // per:"run" = 整场战斗限次；per:"turn" = 每回合限次（回合切换时恢复）
 const ITEMS = [
@@ -913,6 +943,16 @@ function netTeamMsg(m){
       g_buff.chill=true;
       setToast("队友的神奇药水 —— 接下来 3 回合每回合 +30 HP", "#8fe6a0");
       AddRing(g_heartX, g_heartY, 70, 120, 255, 160);
+    } else if (m.k==="pow"){                              // 队友的力量增强：本回合我的伤害 +35%
+      g_buff.powMate=1.35;
+      setToast("队友的力量增强 —— 本回合你的伤害 +35%", "#ffd166");
+      AddRing(g_heartX, g_heartY, 70, 255, 210, 120);
+    } else if (m.k==="wtr"){                              // 队友的治疗水弹
+      if (m.dmg>0 && isLeader()) HitJevil(m.dmg|0);       // Boss 血量只有队长权威
+      if (m.heal>0){
+        const got=healHp(m.heal|0);
+        setToast(`队友的治疗水弹 —— ${got>0?`回复 ${got} HP`:"HP 已经是满的"}`, "#7fe4ff");
+      }
     }
   } else if (m.t==="gtr"){                               // 队友弹了电吉他 → 队长这边放宽本回合弹幕
     if (m.turn===undefined || m.turn===g_turn){
@@ -1293,8 +1333,22 @@ function gearMuted(){ return g_buff.guitar>=2; }
 function clearTurnBuffs(){                 // 一个对手回合结束 → 回合制增益全清，吉他次数回满
   g_buff.tv=false; g_buff.fuse=false; g_buff.guitar=0;
   g_buff.weaken=0; g_buff.chill=false;     // 减攻/降难度只持续本回合
+  g_buff.pow=1; g_buff.powMate=1;          // 力量增强也只算本回合
   g_gearUse.guitar=0;
   tickRegen();                             // 神奇药水：回合结束后结算一次回血
+}
+function healHp(n){                        // 直接回血（带数字与粒子），返回实际回复量
+  if (g_dead || n<=0) return 0;
+  const before=g_hp;
+  g_hp=Math.min(maxHp(), g_hp+n);
+  const got=Math.round(g_hp-before);
+  if (got>0){
+    AddRing(g_heartX, g_heartY, 56, 120, 255, 170);
+    for (let i=0;i<8;++i)
+      g_sparks.push({x:g_heartX+rnd(-15,15), y:g_heartY+rnd(-15,15), t:0, scale:rnd(0.6,1.2)});
+    g_dmg.push({x:g_heartX, y:g_heartY-24, vy:-42, life:0.9, val:got, miss:false, heal:true});
+  }
+  return got;
 }
 function tickRegen(){                      // 药水剩余回合数 -1，并回复 30 HP（阵亡不生效）
   if (!g_buff.regen) return;
@@ -1345,10 +1399,11 @@ function Say(s){ g_subtitle = s; }
 
 function ResetGame(){
   const B = Boss();
-  g_hp=maxHp(); g_items=3; g_pacify=0; g_turn=0;
+  g_hp=maxHp(); g_items=2; g_pacify=0; g_turn=0;
   g_gearUse={scythe:0,tv:0,fuse:0,guitar:0};        // 新一场：道具次数回满
   g_skillUse=0;                                     // 新一场：专属技能每局一次，重新可用
-  g_buff={scythe:false,tv:false,fuse:false,guitar:0,weaken:0,regen:0,chill:false};
+  g_ralsei={powAt:-99, wtrAt:-99};                  // 新一场：祈祷技冷却清零
+  g_buff={scythe:false,tv:false,fuse:false,guitar:0,weaken:0,regen:0,chill:false,pow:1,powMate:1};
   g_lastDrop=""; g_toast=null;
   g_jevHp=B.maxhp; g_jevHpShown=false; g_spareReady=false;
   g_state=ST_INTRO; g_stateT=0; g_sub=SM_NONE; g_btnSel=0;
@@ -1581,7 +1636,7 @@ function useSkill(after){
   }
   g_skillUse++;
   playSfx("snd_menu_select");
-  const sd = skillDmg(sk);                        // 角色被动（Susie：伤害 +10%）
+  const sd = Math.round(skillDmg(sk) * powMul());  // 角色被动 + 力量增强（本回合）
   if (sk.dmg>0){                                  // 有伤害的：原地挥一刀
     startPAttack(0, "fight");
     DoAttack(sd);
@@ -1602,14 +1657,54 @@ function useSkill(after){
   if (g_state===ST_WIN || g_state===ST_SPARE || g_jevHp<=0) return;    // 已经结算：别再盖掉结算画面
   StartDialog(skillLine(sk, sd), after);
 }
+// 使用 Ralsei 的祈祷技：不消耗回合（返回 "free"），用掉后每 4 回合刷新一次
+function usePray(k){
+  const P = PRAY[k];
+  if (!P || !isRalsei() || g_dead) return "fail";
+  const cd = prayCd(k);
+  if (cd > 0){ setToast(`${P.name}：还要等 ${cd} 回合才刷新`, "#ff9a9a"); return "fail"; }
+  g_ralsei[k==="pow" ? "powAt" : "wtrAt"] = g_turn;        // 记下使用回合（冷却从这里算）
+  playSfx("snd_menu_select");
+  if (k==="pow"){
+    g_buff.pow = 1.10;                                     // 自己 +10%（队友由 sk 消息 +35%）
+    setToast("力量增强 —— 自己 +10%、队友 +35%（本回合）", "#ffd166");
+    AddRing(g_heartX, g_heartY, 88, 255, 210, 120);
+    BurstParts(g_heartX, g_heartY, 10, 255, 220, 140, 0.6);
+    if (net.role) netRtcSend({t:"sk", from:net.cid, turn:g_turn, k:"pow"}, 1, 2);
+    return "free";
+  }
+  // 治疗水弹：三种随机结果
+  const r = randInt(3);
+  let dmg = 0, heal = 0, txt = "";
+  if (r === 0){ dmg = 20; heal = 30; txt = "20 伤害 · 双方回 30 HP"; }
+  else if (r === 1){ dmg = 30; txt = "水刃 30 伤害"; }
+  else { heal = 40; txt = "双方回 40 HP"; }
+  AddRing(JEV_CX, JEV_CY, 96, 130, 225, 255);
+  AddRing(g_heartX, g_heartY, 70, 130, 230, 255);
+  BurstParts(g_heartX, g_heartY, 12, 130, 230, 255, 0.7);
+  if (dmg > 0){ startPAttack(0, "fight"); DoAttack(dmg); AddShake(0.18, 3); }
+  if (heal > 0) healHp(heal);
+  if (net.role) netRtcSend({t:"sk", from:net.cid, turn:g_turn, k:"wtr", dmg:dmg, heal:heal}, 1, 2);
+  if (g_state===ST_WIN || g_state===ST_SPARE || g_jevHp<=0) return "free";   // 已经结算：别再盖提示
+  setToast(`治疗水弹 —— ${txt}`, "#7fe4ff");
+  return "free";
+}
 function DoPlayerAction(){
   const B = Boss();
   // 行动结束的去向：一律走 AfterAction（单人=对手台词→弹幕回合；联机=先跟队友对表）
   // 技能/ACT/道具都算消耗一回合，不再回到指令菜单
   const after = ST_WAIT;
   if (g_sub===SM_ACT){
-    if (g_subSel===0){ useSkill(after); g_sub=SM_NONE; return; }   // 用过也要消耗一回合
-    if (g_subSel===1){ StartDialog(B.check, after); }
+    const list=actList();
+    const e=list[clamp(g_subSel,0,list.length-1)] || list[0];
+    if (e.k==="skill"){ useSkill(after); g_sub=SM_NONE; return; }   // 用过也要消耗一回合
+    if (e.k==="pow" || e.k==="wtr"){
+      // 祈祷技不消耗回合：用掉后留在 ACT 页，还能接着出刀/换别的行动
+      const r=usePray(e.k);
+      if (r==="free"){ g_sub=SM_ACT; return; }
+      g_state=ST_MENU; g_sub=SM_NONE; g_subSel=0; return;            // 冷却中：退回指令行
+    }
+    if (e.k==="check"){ StartDialog(B.check, after); }
     else {
       g_pacify++;
       if (g_pacify>=B.actNeed){
@@ -2580,7 +2675,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
     }
     break;
   case ST_SUB: {
-    const n = g_sub===SM_ACT?3 : g_sub===SM_ITEM?itemList().length : 2;
+    const n = g_sub===SM_ACT?actList().length : g_sub===SM_ITEM?itemList().length : 2;
     if (vk==="ArrowUp"){ g_subSel=(g_subSel+n-1)%n; playSfx("snd_menu_move"); }
     if (vk==="ArrowDown"){ g_subSel=(g_subSel+1)%n; playSfx("snd_menu_move"); }
     if (vk==="x"){ g_state=ST_MENU; g_sub=SM_NONE; playSfx("snd_menu_move"); }
@@ -2593,7 +2688,7 @@ function pressKey(vk){        // 统一按键处理（键盘 + 触屏等价）
       const c=(250+392)*0.5;
       let acc=1.0-Math.abs(g_barX-c)/71.0;
       if (acc<0) acc=0;
-      g_pendingDmg=Math.floor((16+acc*acc*acc*58)*dmgMul());   // 角色被动（Susie：伤害 +10%）
+      g_pendingDmg=Math.floor((16+acc*acc*acc*58)*dmgMul()*powMul());   // 角色被动 + 力量增强
       if (g_buff.scythe){                            // 恶魔镰刀：这一次出刀伤害翻倍
         g_pendingDmg*=2; g_buff.scythe=false;
         setToast(`恶魔镰刀 —— 伤害 ×2（${g_pendingDmg}）`, "#d9a6ff");
@@ -3339,11 +3434,13 @@ function RenderCreate(){
       ctx.strokeStyle = sel ? "#ffe878" : "rgba(130,130,160,0.55)";
       ctx.lineWidth = sel?3:1.5; ctx.strokeRect(x,y,cw,chh);
       drawCharFrame(i, x+cw/2, y+92+(sel?Math.sin(g_animT*4)*3:0), 104, cw-20);
-      outlineText(CHARS[i].label, 0, y+168, 20, sel?"#fff08c":"#d6d2dc", x+cw/2);
+      outlineText(CHARS[i].label, 0, y+162, 20, sel?"#fff08c":"#d6d2dc", x+cw/2);
       // 专属技能名（战斗里在 ACT 第一项使用，消耗一回合，每局一次）+ 角色被动
-      outlineText(`★ ${SKILLS[i].name}·每局1次`, 0, y+181, 10.5,
+      // Ralsei 另有力量增强 / 治疗水弹，卡片一行写全（详细规则在 ACT 页里）
+      const skillTxt = (i===2) ? "★ 药水/力量增强/治疗水弹" : `★ ${SKILLS[i].name}·每局1次`;
+      outlineText(skillTxt, 0, y+186, i===2?9.5:10.5,
                   sel?"#ffc9d8":"rgba(185,198,222,0.72)", x+cw/2, false);
-      outlineText(`被动：${CHARS[i].passive}`, 0, y+197, 9.5,
+      outlineText(`被动：${CHARS[i].passive}`, 0, y+199, 9.5,
                   sel?"rgba(165,228,255,0.95)":"rgba(158,176,205,0.72)", x+cw/2, false);
       hot(x,y,cw,chh, ()=>{ g_createSel=i; playSfx("snd_menu_move"); });
     }
@@ -4879,6 +4976,8 @@ function Render(){
     if (g_buff.guitar>0) bl.push(`音波 ×${g_buff.guitar}`);
     if (g_buff.weaken>0) bl.push("剑威 敌攻-50%");
     if (g_buff.regen>0) bl.push(`药水 ×${g_buff.regen}`);
+    if (g_buff.pow>1) bl.push("力量 +10%");
+    if (g_buff.powMate>1) bl.push("队友增强 +35%");
     if (bl.length) outlineText(bl.join("　"), 272, byy+1, 11, "#8fe6ff", -1, false);
 
     // 战斗菜单四项（常驻显示，用方向键选、A 确认）
@@ -4950,29 +5049,52 @@ function Render(){
     } else {
       const sk = mySkill();
       const left = skillLeft();
-      const opts = g_sub===SM_ACT ? [sk.name,"检查","安抚"] : ["饶恕","逃跑"];
+      const isAct = (g_sub===SM_ACT);
+      const list = isAct ? actList() : null;                  // ACT：技能 +（Ralsei 两个祈祷）+ 检查 + 安抚
+      const opts = isAct ? list.map(e=>e.name) : ["饶恕","逃跑"];
       const nOpt = opts.length;
-      const step = nOpt>2 ? 34 : 42;
+      const tight = nOpt >= 4;                                // Ralsei 的 ACT 有 5 项：压缩行距
+      const step = tight ? 21 : (nOpt>2 ? 34 : 42);
+      const y0   = tight ? BOX_Y0+18 : BOX_Y0+(nOpt>2?36:34);
       for (let i=0;i<nOpt;++i){
-        const y=BOX_Y0+(nOpt>2?36:34)+i*step;
-        const isSkill = (g_sub===SM_ACT && i===0);
-        const gone = isSkill && left<=0;                       // 本局用过了
+        const y=y0+i*step;
+        const e = isAct ? list[i] : null;
+        const isSkill = !!(e && e.k==="skill");
+        const gone = isSkill && left<=0;                      // 本局用过了
+        const cdN = (e && (e.k==="pow"||e.k==="wtr")) ? prayCd(e.k) : 0;
+        const off = gone || cdN>0;                            // 灰掉：用完了 / 冷却中
         let col;
-        if (isSkill) col = gone ? (i===g_subSel?"rgba(190,180,190,0.85)":"rgba(150,152,172,0.62)")
-                                : (i===g_subSel?sk.col:"rgba(255,255,255,0.78)");
-        else         col = i===g_subSel?"#fff":"#d8c8d2";
-        outlineText(opts[i], BOX_X0+44, y-8, isSkill?21:20, col, -1);
+        if (e && (isSkill || e.k==="pow" || e.k==="wtr"))
+          col = off ? (i===g_subSel?"rgba(196,188,200,0.9)":"rgba(150,152,172,0.62)")
+                    : (i===g_subSel?e.col:"rgba(238,240,252,0.86)");
+        else col = i===g_subSel?"#fff":"#d8c8d2";
+        outlineText(opts[i], BOX_X0+44, tight?y-2:y-8, isSkill?(tight?18:21):(tight?16:20), col, -1);
         if (i===g_subSel){ ctx.save(); ctx.imageSmoothingEnabled=false;
-          drawImg(img("soul"), BOX_X0+24, y-5, 22,22); ctx.restore(); }
-        if (isSkill) outlineText(gone ? "本局已用掉" : `★ ${skillPerTxt(sk)}`, BOX_X0+178, y-2, 10.5,
-                                 gone ? "rgba(160,160,180,0.7)"
-                                      : (i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)"), -1, false);
+          drawImg(img("soul"), BOX_X0+24, tight?y+1:y-5, tight?15:22, tight?15:22); ctx.restore(); }
+        if (e){
+          let hint="", hcol="rgba(170,190,225,0.8)";
+          if (isSkill){
+            if (gone){ hint="本局已用掉"; hcol="rgba(160,160,180,0.7)"; }
+            else { hint=`★ ${skillPerTxt(sk)}`;
+                   hcol = i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)"; }
+          } else if (e.k==="pow" || e.k==="wtr"){
+            if (cdN>0){ hint=`冷却 ${cdN} 回合`; hcol="rgba(165,165,185,0.78)"; }
+            else { hint=`★ ${PRAY[e.k].perTxt}`;
+                   hcol = i===g_subSel?"rgba(255,240,190,0.92)":"rgba(170,190,225,0.8)"; }
+          }
+          if (hint) outlineText(hint, BOX_X0+178, tight?y+3:y-2, tight?10:10.5, hcol, -1, false);
+        }
       }
-      if (g_sub===SM_ACT){
-        const note = skillLeft()>0 ? `★ 每局一次 · 消耗一回合行动`
-                                   : `★ 本局已用掉 · 再点只会白白消耗一回合`;
-        outlineText(note, BOX_X0+44, BOX_Y0+9, 11,
-                    skillLeft()>0?"rgba(160,185,225,0.78)":"rgba(255,150,150,0.85)", -1, false);
+      if (isAct){
+        if (tight){
+          outlineText("增强/水弹：不耗回合，各 4 回合刷新", BOX_X0+150, BOX_Y0+3, 10,
+                      "rgba(160,185,225,0.8)", -1, false);
+        } else {
+          const note = skillLeft()>0 ? `★ 每局一次 · 消耗一回合行动`
+                                     : `★ 本局已用掉 · 再点只会白白消耗一回合`;
+          outlineText(note, BOX_X0+44, BOX_Y0+9, 11,
+                      skillLeft()>0?"rgba(160,185,225,0.78)":"rgba(255,150,150,0.85)", -1, false);
+        }
       }
       if (g_sub===SM_MERCY && g_spareReady){
         const im=img("sparkle");
@@ -4983,7 +5105,8 @@ function Render(){
       if (g_sub===SM_MERCY)
         outlineText("饶恕 = 放它走 · 不算胜利、不掉道具（卡牌下会记下饶恕）",
                     BOX_X0+24, BOX_Y1-28, 11, "rgba(150,205,240,0.85)", -1, false);
-      outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, BOX_Y0+10, 14, "#9aa8c8", -1, false);
+      outlineText(isTouch?"B 返回":"X 返回", BOX_X1-74, tight?BOX_Y1-18:BOX_Y0+10,
+                  tight?12:14, "#9aa8c8", -1, false);
     }
     ctx.restore();
   }
