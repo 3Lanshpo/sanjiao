@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------------- 常量 ----------------
-const GAME_VER = "20261110a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
+const GAME_VER = "20261111a";        // 改这里 + index.html 的 ?v= 才能让浏览器拉新版
 let WINW = 640, WINH = 480;      // 舞台逻辑尺寸：随屏幕比例扩展（横屏加宽/竖屏加高）
 let VOX = 0, VOY = 0;            // 640x480 游戏场景在舞台中的偏移
 const BOX_X0 = 120, BOX_Y0 = 278, BOX_X1 = 520, BOX_Y1 = 418;
@@ -352,7 +352,7 @@ function applyAccount(u){                    // 切到某个账号
   net.name = g_profile.name;
   try { localStorage.setItem("sj_name", net.name); } catch(e){}
   avatarLayout();
-  if (net.on) netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+  if (net.on) netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin, c:netCloudOk()?1:0});
   return true;
 }
 
@@ -599,6 +599,9 @@ const net = {
   pTs:0, bTs:0,                                           // 已处理的最新 hb / bf 时间戳（双路去重）
   myAct:false, pAct:false, pActPending:false,              // 本回合：我 / 队友 是否已行动
   actSeen:"",                                              // act 去重键（QoS 重发只算一次）
+  actTurn:0, actKind:"", actDmg:0, actAt:0, actResend:0,    // 我的行动包（等队友时可以补发）
+  joinTry:null,                                            // 队员侧：已同意邀请，等队长确认（没回应就重发 acc）
+  formAt:0, okTry:0, okAt:0,                               // 队长侧：组队成立时间 / 补发 ok 的节奏
   skSeen:"",                                               // 技能附加效果去重键
   pDead:false,                                             // 队友是否已阵亡
   startNo:0,                                               // 开战序号（队长递增 / 队员记录已应用的那个）
@@ -634,6 +637,8 @@ function netPubRetry(topic, obj, times){                 // 关键消息：QoS1 
 function netRole(){ return net.role; }
 function isMember(){ return net.role==="member"; }
 function isLeader(){ return net.role==="leader"; }
+// 离线模式（没登云账号）不参与联机：存档只在本机，组队后两边进度会各走各的
+function netCloudOk(){ try { return typeof g_cloud!=="undefined" && !!g_cloud.uid; } catch(e){ return false; } }
 
 // ---------------- WebRTC 直连（P2P） ----------------
 // MQTT 公共 broker 要绕到境外，单程 200~400ms，打弹幕根本跟不上。
@@ -787,7 +792,7 @@ function netMsg(topic, m){
       if (m.i && net.inst && m.i!==net.inst) netRerollId();   // 复制标签页 → 身份撞车，换一个
       return;
     }
-    net.players.set(cid, {n:m.n||"???", s:m.s||"lobby", ts:Date.now()});
+    net.players.set(cid, {n:m.n||"???", s:m.s||"lobby", ts:Date.now(), c:(m.c?1:0)});
     if (net.partner && cid===net.partner){
       net.partnerName=m.n;
       if (m.k!==undefined) net.pSkin=m.k|0;
@@ -801,21 +806,26 @@ function netMsg(topic, m){
   }
   if (topic===NET_BASE+"/i/"+net.cid){                   // 发给我的邀请/回应
     if (m.t==="inv"){
-      if (!net.role && (!net.invite || Date.now()-net.invite.ts>6000))
+      if (!netCloudOk()){
+        // 离线模式不参与联机：直接回绝，别让对方干等
+        netPub(NET_BASE+"/i/"+m.from, {t:"solo", from:net.cid, n:net.name}, 1);
+      } else if (!net.role && (!net.invite || Date.now()-net.invite.ts>6000))
         net.invite={from:m.from, n:m.n, ts:Date.now()};
       else if (net.role) netPub(NET_BASE+"/i/"+m.from, {t:"busy"});
     } else if (m.t==="acc"){ netTeamForm(m.from, m.n, m.k); }
     else if (m.t==="rej"){ if (net.invSent===m.from){ net.invSent=0; Say(m.n+" 拒绝了组队邀请"); } }
     else if (m.t==="busy"){ if (net.invSent===m.from){ net.invSent=0; Say(m.n+" 正在组队中"); } }
+    else if (m.t==="solo"){ if (net.invSent===m.from){ net.invSent=0; Say((m.n||"对方")+" 是离线模式，不能组队"); } }
     else if (m.t==="ok"){                                // 队长确认 → 我是队员
-      if (net.leftAt && Date.now()-net.leftAt<6000) return;  // 刚退出，忽略迟到的确认
+      if (net.leftAt && Date.now()-net.leftAt<1500) return;  // 刚退出，忽略迟到的确认（原来 6 秒太长，重邀会被吃掉）
       if (net.role==="member" && net.partner===m.leader) return;   // QoS 重发的重复包：别覆盖当前字幕/状态
+      if (net.role) netDisband(false);                   // 万一还挂着别的队伍：先清干净再加入
       net.role="member"; net.partner=m.leader; net.partnerName=m.n;
       net.pSkin=(m.k!==undefined)?(m.k|0):net.pSkin; net.lostSince=0; net.leftAt=0;
       net.teamTopic=NET_BASE+"/t/"+m.leader;
-      net.invite=null; net.invSent=0; net.panel=false;
+      net.invite=null; net.invSent=0; net.panel=false; net.joinTry=null;
       net.pTs=0; net.bTs=0;
-      net.cli.subscribe(net.teamTopic, ()=>{});
+      try { net.cli && net.cli.subscribe(net.teamTopic, ()=>{}); } catch(e){}
       // 原来正在单人挑战（或刚结算完）→ 先退出这场，等着队长开；否则 start 会被当成「已在战斗中」忽略
       if (g_state!==ST_TITLE){
         g_dead=false; g_deadChoice=false; g_deadSel=0; g_pauseUI=false; g_sub=SM_NONE;
@@ -831,12 +841,19 @@ function netMsg(topic, m){
 }
 // 队长收到同意 → 组队成立
 function netTeamForm(cid, name, skin){
-  if (net.role || (net.invSent && net.invSent!==cid)) return;
+  // 对方没收到 ok 会重发 acc：这时不要默默忽略，原样再确认一次（握手自愈）
+  if (net.role==="leader" && net.partner===cid){
+    netPubRetry(NET_BASE+"/i/"+cid, {t:"ok", leader:net.cid, n:net.name, k:g_profile.skin}, 2);
+    return;
+  }
+  if (net.role){ netPub(NET_BASE+"/i/"+cid, {t:"busy", from:net.cid}, 1); return; }
+  if (net.invSent && net.invSent!==cid) return;
   net.role="leader"; net.partner=cid; net.partnerName=name;
   net.pSkin=(skin!==undefined)?(skin|0):net.pSkin; net.lostSince=0; net.leftAt=0;
   net.teamTopic=NET_BASE+"/t/"+net.cid;
   net.invSent=0; net.panel=false; net.pTs=0; net.bTs=0;
-  net.cli.subscribe(net.teamTopic, ()=>{});
+  net.formAt=Date.now(); net.okTry=0; net.okAt=Date.now();
+  try { net.cli && net.cli.subscribe(net.teamTopic, ()=>{}); } catch(e){}   // 订阅失败不能挡住后面的确认包
   netPubRetry(NET_BASE+"/i/"+cid, {t:"ok", leader:net.cid, n:net.name, k:g_profile.skin}, 3);
   Say("已与 "+name+" 组队！你是队长（红心），选择 Boss 后 TA 会一起挑战");
   setTimeout(()=>{ if (isLeader() && net.partner===cid) netRtcStart(); }, 900);   // 等对方订阅好再发 offer
@@ -916,8 +933,14 @@ function netTeamMsg(m){
     if (r>=0 && r<2000) net.rtt = net.rtt ? net.rtt*0.68+r*0.32 : r;
   } else if (m.t==="act"){                               // 队友已出刀/已行动
     if (m.turn!==undefined){
-      if (m.turn===g_turn+1 && g_state===ST_ATTACK){ net.pActPending=true; return; }  // 我还在躲弹，下回合生效
-      if (m.turn!==g_turn) return;                       // 上一回合的迟到包
+      if (g_state===ST_ATTACK && m.turn>g_turn){ net.pActPending=true; return; }  // 我还在躲弹，下回合生效
+      if (m.turn<g_turn){
+        // 队友的回合号落后一格：只有「我已经出刀、正卡在等他」才当成这一回合的迟到包，
+        // 否则两边会互相当成过期包丢掉，永远停在「等待出刀」
+        if (!(net.myAct && g_state===ST_WAIT && m.turn===g_turn-1)) return;
+      } else if (m.turn>g_turn){
+        g_turn=m.turn;                                  // 对方回合号更靠前 → 直接对齐，别让两边各数各的
+      }
     }
     const key=m.from+":"+m.turn+":"+m.kind;
     if (net.actSeen && net.actSeen===key) return;        // 重发包只算一次（否则队长会重复扣血）
@@ -980,7 +1003,12 @@ function netTeamMsg(m){
     g_gridWarn.length=0; g_heartX=BOX_CX; g_heartY=BOX_CY;
     Say(m.txt||"");
   } else if (m.t==="st" && isMember()){                  // 状态同步（胜负/台词）
-    if (m.s===g_state) return;                           // QoS1 重复消息
+    if (m.s===g_state){
+      // 回合号以队长为准：两边各自 +1 容易差一格，差一格就会把对方的 act 当过期包丢掉
+      if (m.s===ST_MENU && m.turn!==undefined && m.turn!==g_turn) g_turn=m.turn;
+      return;                                   // QoS1 重复消息
+    }
+    if (m.turn!==undefined && m.s!==ST_TITLE && m.s!==ST_INTRO) g_turn=m.turn;
     if (m.s===ST_WIN||m.s===ST_LOSE||m.s===ST_SPARE){
       if (m.s===ST_WIN){ AwardDrop(g_boss); g_state=ST_WIN; }       // 队友看到的胜利也算通关掉落
       else if (m.s===ST_SPARE){ MarkSpared(g_boss); g_lastDrop=""; g_state=ST_SPARE; }
@@ -1066,6 +1094,8 @@ function netDisband(sendBye){
   net.role=""; net.partner=""; net.partnerName=""; net.pSkin=undefined; net.teamTopic="";
   net.px=undefined; net.php=undefined; net.pmh=undefined; net.lostSince=0; net.pseen=0; net.pS="";
   net.myAct=false; net.pAct=false; net.pActPending=false; net.pDead=false;
+  net.joinTry=null; net.formAt=0; net.okTry=0; net.okAt=0;
+  net.actResend=0; net.actAt=0; net.actSeen="";
   net.startNo=0;                                  // 开战序号：队长每开一场 +1，队员按序号去重（重发/重启都靠它）
   net.dpx=undefined; net.dpy=undefined; net.pvx=0; net.pvy=0;
   net.clkMin=undefined; net.hbLag=0; net.rtt=0; net.pingT=0;
@@ -1090,15 +1120,19 @@ function netRerollId(){                                  // 复制标签页导�
 }
 function netSendInvite(cid){
   if (net.role){ Say("已经在队伍中了"); return; }
+  if (!netCloudOk()){ Say("离线模式不能组队：先登录账号"); playSfx("snd_menu_back"); return; }
   net.invSent=cid;
-  netPub(NET_BASE+"/i/"+cid, {t:"inv", from:net.cid, n:net.name, k:g_profile.skin});
+  netPubRetry(NET_BASE+"/i/"+cid, {t:"inv", from:net.cid, n:net.name, k:g_profile.skin}, 2);
   Say("已向 "+(net.players.get(cid)?.n||"对方")+" 发出组队邀请…");
 }
 function netAcceptInvite(){
   const iv=net.invite; if (!iv) return;
   net.invite=null;
-  netPub(NET_BASE+"/i/"+iv.from, {t:"acc", from:net.cid, n:net.name, k:g_profile.skin});
-  Say("已同意 "+iv.n+" 的组队邀请…");
+  if (!netCloudOk()){ Say("离线模式不能组队：先登录账号"); return; }
+  // 队长那边可能没收到 acc / 我没收到 ok：先挂一个「加入中」，没确认就每 900ms 重发
+  net.joinTry={cid:iv.from, at:Date.now(), until:Date.now()+9000, tries:0};
+  netPubRetry(NET_BASE+"/i/"+iv.from, {t:"acc", from:net.cid, n:net.name, k:g_profile.skin}, 2);
+  Say("已同意 "+iv.n+" 的组队邀请…（等对方确认）");
 }
 function netDeclineInvite(){
   const iv=net.invite; if (!iv) return;
@@ -1110,20 +1144,20 @@ function netLeave(){                                     // 队员/队长主动�
   const wasMember=isMember();
   net.leftAt=Date.now();
   netDisband(true);
-  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin, c:netCloudOk()?1:0});
   Say(wasMember ? "已退出组队" : "队伍已解散");
   if (wasMember && g_state>=ST_INTRO) GoTitle();
 }
-function netLobbyList(){                                 // 可邀请的在线玩家
+function netLobbyList(){                                 // 可邀请的在线玩家（只有登录了云账号的能联机）
   const now=Date.now(), out=[];
   for (const [cid,p] of net.players)
-    if (now-p.ts<8000 && p.s==="lobby" && cid!==net.invSent)
+    if (now-p.ts<8000 && p.s==="lobby" && p.c===1 && cid!==net.invSent)
       out.push({cid, ...p, n: p.n===net.name ? p.n+"（另一窗口）" : p.n});   // 同名=同浏览器的另一个窗口
   return out;
 }
-function netOnline(){                                    // 在线人数（含自己）
+function netOnline(){                                    // 在线人数（含自己；只算能联机的人）
   const now=Date.now(); let n=1;
-  for (const p of net.players.values()) if (now-p.ts<8000) n++;
+  for (const p of net.players.values()) if (now-p.ts<8000 && p.c===1) n++;
   return n;
 }
 function netTick(){
@@ -1133,7 +1167,7 @@ function netTick(){
   if (nowMs-net.lastPre>2500){
     net.lastPre=nowMs;
     const s = net.role ? (g_state===ST_ATTACK?"battle":"team") : "lobby";
-    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs, i:net.inst, k:g_profile.skin});
+    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s, ts:nowMs, i:net.inst, k:g_profile.skin, c:netCloudOk()?1:0});
     for (const [cid,p] of net.players)                   // 清理过期玩家
       if (nowMs-p.ts>9000){
         net.players.delete(cid);
@@ -1143,8 +1177,32 @@ function netTick(){
         }
       }
   }
+  // 队员侧：已同意邀请但还没收到确认 → 每 900ms 重发 acc（丢包自愈，不然就出现
+  // 「队长显示已入队、队员这边什么反应都没有」）
+  if (net.joinTry && !net.role){
+    if (nowMs>net.joinTry.until){
+      net.joinTry=null;
+      Say("组队没成功：对方没确认，再邀请一次试试");
+    } else if (nowMs-net.joinTry.at>900){
+      net.joinTry.at=nowMs; net.joinTry.tries++;
+      netPubRetry(NET_BASE+"/i/"+net.joinTry.cid, {t:"acc", from:net.cid, n:net.name, k:g_profile.skin}, 2);
+    }
+  }
   // 组队频道同步
   if (!net.role) return;
+  // 队长侧：队员的 presence 迟迟还停在 lobby（说明它没收到 ok）→ 补发确认；7 秒还不进来就散队
+  if (isLeader() && net.formAt){
+    const pp=net.players.get(net.partner);
+    const joined = !!(pp && pp.s && pp.s!=="lobby") || (net.pseen && nowMs-net.pseen<3200);
+    if (joined) net.formAt=0;
+    else if (nowMs-net.formAt>7200){
+      const nm=net.partnerName; net.formAt=0;
+      netDisband(false); Say(nm+" 没能进队（网络不通？再邀请一次试试）"); return;
+    } else if ((net.okTry||0)<4 && nowMs-(net.okAt||0)>1400){
+      net.okAt=nowMs; net.okTry=(net.okTry||0)+1;
+      netPub(NET_BASE+"/i/"+net.partner, {t:"ok", leader:net.cid, n:net.name, k:g_profile.skin}, 1);
+    }
+  }
   if (net.lostSince && nowMs-net.lostSince>2200){        // 队友 presence 已回大厅且迟迟没回来 → 解散
     const nm=net.partnerName;
     netDisband(false); Say(nm+" 已退出组队");
@@ -1211,7 +1269,7 @@ function netTick(){
       // ② 队友看不到的状态迁移（胜利/失败/台词）
       if (g_state!==net.lastState){
         if (g_state===ST_WIN||g_state===ST_LOSE||g_state===ST_SPARE||g_state===ST_MENU)
-          netRtcSend({t:"st", from:net.cid, s:g_state, txt:g_subtitle}, 1, 3);
+          netRtcSend({t:"st", from:net.cid, s:g_state, txt:g_subtitle, turn:g_turn}, 1, 3);
         net.lastState=g_state;
       }
     }
@@ -1416,6 +1474,7 @@ function ResetGame(){
   g_whiteFlash=0.45;
   g_dead=false; g_deadChoice=false; g_deadSel=0;
   net.myAct=false; net.pAct=false; net.pDead=false; net.pActPending=false;
+  net.actSeen=""; net.skSeen=""; net.actResend=0; net.actAt=0;   // 新一场：行动去重/补发状态清零
   // 新一场：队友心的插值状态清掉（上一场可能停在 -999 的「阵亡坐标」上）
   net.px=undefined; net.dpx=undefined; net.pvx=0; net.pvy=0;
   AddRing(JEV_CX,JEV_CY,120,255,230,150);
@@ -1761,6 +1820,8 @@ function AfterAction(kind, dmg){               // 本回合自己的行动结束
   g_actionKind=kind||""; g_actionDmg=dmg|0;
   if (!net.role){ StartDialog(Boss().line[randInt(5)], ST_ATTACK); return; }
   net.myAct=true;
+  net.actTurn=g_turn; net.actKind=g_actionKind; net.actDmg=g_actionDmg;
+  net.actAt=Date.now(); net.actResend=0;       // 记住这个包：等队友时丢包可以补发
   netRtcSend({t:"act", from:net.cid, turn:g_turn, kind:g_actionKind, dmg:g_actionDmg}, 1, 2);
   // 队友先出过刀 → 直接开打；队友已阵亡（在观战）→ 不用等他，他那边跟着 atk 走
   if (net.pAct || net.pDead){ netBothActed(); return; }
@@ -1831,10 +1892,15 @@ function Update(dt){
     g_stateT+=dt;
     if (!net.role){ netBothActed(); break; }         // 队伍已经没了（队友退了/解散）→ 立刻继续单打
     if (net.pDead){ netBothActed(); break; }         // 队友已倒下（观战）→ 不用他出刀
+    // 我发出的 act 丢了 → 每 800ms 补发一次（对方按 from:turn:kind 去重，不会重复扣血）
+    if ((net.actResend||0)<4 && Date.now()-(net.actAt||0)>800){
+      net.actAt=Date.now(); net.actResend=(net.actResend||0)+1;
+      netRtcSend({t:"act", from:net.cid, turn:net.actTurn, kind:net.actKind, dmg:net.actDmg}, 1, 1);
+    }
     if (net.pseen && Date.now()-net.pseen>3500){      // 队友心跳断了（掉线没发 bye）→ 别干等
       net.pAct=true; netBothActed(); break;
     }
-    if (g_stateT>15){ net.pAct=true; netBothActed(); }   // 兜底开打
+    if (g_stateT>6){ net.pAct=true; netBothActed(); }   // 兜底开打（原来 15 秒，等得太久像卡死）
     break;
   case ST_FIGHT:
     g_stateT+=dt;
@@ -2148,8 +2214,12 @@ function Update(dt){
       }
       // ---- Pink：4x4 炸弹格（预告闪烁 → 整行整列十字同时引爆）
       if (g_pattern===P_MEOW && g_spawnT<=0){
-        g_spawnT=1.05/ramp;
-        const total=(g_turn>=6)?3:(g_turn>=4)?2:1;
+        // 十字炸弹格：难度锁定在第 5 回合 —— 之后不再加格子、引信也不再缩短
+        // （以前 turn≥6 会变成 3 格 + 0.65s 引信，两行两列同时炸，基本没法躲）
+        const bt=Math.min(g_turn, 5);
+        const bRamp=(g_buff.chill ? 1.0 : 1.0 + Math.min(1.0, bt*0.10)) * gearRate();
+        g_spawnT=1.05/bRamp;
+        const total=(bt>=4)?2:1;
         const used=[];
         for (let k=0;k<total;++k){
           let gx=0, gy=0, ok=false;
@@ -2158,7 +2228,7 @@ function Update(dt){
             ok=!used.some(c=>c[0]===gx&&c[1]===gy);
           }
           used.push([gx,gy]);
-          g_gridWarn.push({gx,gy,t:1.05/ramp});
+          g_gridWarn.push({gx,gy,t:1.05/bRamp});
           const cw=(BOX_X1-BOX_X0-100)/3, ch=(BOX_Y1-BOX_Y0-44)/3;
           BurstParts(BOX_X0+50+gx*cw, BOX_Y0+22+gy*ch, 5,80,255,170,210,0.4);
         }
@@ -3342,7 +3412,7 @@ function createChooseSkin(){
     hideInput();
     net.name = g_profile.name;
     try { localStorage.setItem("sj_name", net.name); } catch(e){}
-    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+    netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin, c:netCloudOk()?1:0});
     avatarLayout();
     playSfx("snd_menu_select");
     g_createNew = false;
@@ -3364,7 +3434,7 @@ function createChooseSkin(){
   hideInput();
   net.name = g_profile.name;                   // 组队邀请里显示的就是这个名字
   try { localStorage.setItem("sj_name", net.name); } catch(e){}
-  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin});
+  netPub(NET_BASE+"/p/"+net.cid, {n:net.name, s:"lobby", ts:Date.now(), i:net.inst, k:g_profile.skin, c:netCloudOk()?1:0});
   avatarLayout();
   playSfx("snd_menu_select");
   g_createNew = false;
@@ -3767,19 +3837,11 @@ function RenderLogin(){
   btn(bx0,           by, bwd, 46, "登　录", ()=>{ doLogin(); }, 19);
   btn(bx0+bwd+gap,   by, bwd, 46, "注　册", ()=>{ playSfx("snd_menu_select"); newAccountFromLogin(); }, 19);
 
-  // ---- 三个小字入口：忘记密码 / 离线进入 / 退出账号
+  // ---- 小字入口：忘记密码 / 退出账号（不提供「离线进入」：账号是唯一入口，联机也只认账号）
   const ly = 334+VOY;
   const ca = currentAccount();
-  const fx = ca ? cx-140 : cx;
-  outlineText("忘记密码", 0, ly, 13, "#8fb6ff", fx, false);
-  hot(fx-40, ly-6, 96, 22, ()=>{ playSfx("snd_menu_move"); openSignup("reset"); });
-  if (ca){
-    outlineText("离线进入本机存档", 0, ly, 13, "#ffd257", cx+14, false);
-    hot(cx-64, ly-6, 156, 22, ()=>{
-      hideInput(); applyAccount(ca.user); playSfx("snd_menu_select"); Say(""); GoTitle();
-      setToast("离线模式：这份进度只在这台电脑上", "#ffd257");
-    });
-  }
+  outlineText("忘记密码", 0, ly, 13, "#8fb6ff", cx, false);
+  hot(cx-40, ly-6, 96, 22, ()=>{ playSfx("snd_menu_move"); openSignup("reset"); });
   if (g_cloud.uid){
     outlineText("退出账号", 0, ly+22, 12, "#8a92b0", cx, false);
     hot(cx-40, ly+16, 80, 20, ()=>{ cloudLogout(); });
@@ -3790,7 +3852,7 @@ function RenderLogin(){
   if (!g_cloud.uid && !ca)
     outlineText("第一次来先点「注册」：邮箱收一次验证码就好", 0, 422+VOY, 12, "#7f92c4", cx, false);
   else if (!g_cloud.uid && ca)
-    outlineText("云端存档在哪台电脑都能登；离线进入只玩本机这份", 0, 422+VOY, 11, "#7f92c4", cx, false);
+    outlineText("登录后存档跟账号走，换电脑、组队都靠它", 0, 422+VOY, 11, "#7f92c4", cx, false);
 }
 
 function RenderSignup(){
@@ -5481,6 +5543,7 @@ function renderNetHUD(uiBot){
     outlineText("在线玩家（Tab 切换 · Enter 邀请）", px0+14, py0+12, 13, "#9fb4e8", -1, false);
     let rowY=py0+head-12;
     if (net.role) outlineText("已在队伍中（Enter 退出）", px0+16, rowY, 14, "#ffd257", -1, false);
+    else if (!netCloudOk()) outlineText("离线模式不能联机 · 登录账号后才能组队", px0+16, rowY, 13, "#ffd257", -1, false);
     else if (!L.length) outlineText("暂无可邀请的玩家", px0+16, rowY, 14, "#8a92b0", -1, false);
     for (let i=0;i<L.length && i<6;++i){
       const sel=(net.selIdx-1)===i;
